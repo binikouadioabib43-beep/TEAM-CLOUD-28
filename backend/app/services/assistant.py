@@ -35,6 +35,10 @@ KNOWLEDGE = """EcoAbidjan aide a garder Abidjan propre et a valoriser les dechet
 - Revendre ses dechets recyclables (menages, commercants, citoyens) : ecran "Declarer". Deux modes : depot en point relais
   (remuneration + points de fidelite) ou collecte a domicile (remuneration seulement). Le montant final = poids pese par
   l'agent x tarif du jour. Le poids declare n'est qu'une estimation.
+- Seuil Y : la collecte a domicile n'est possible qu'a partir d'un poids minimum (seuil Y, voir faits). En dessous,
+  l'usager depose en point relais, ce qui lui rapporte aussi des points.
+- Points : gagnes par kg depose en point relais (+ bonus par depot) et par signalement confirme. Ils se convertissent
+  en FCFA (valeur d'un point et minimum de conversion dans les faits) depuis le portefeuille.
 - Paiement : apres validation, la remuneration passe "en attente" puis "payee" (Mobile Money, especes ou virement).
 - Statuts d'un signalement : signale -> confirme -> planifie (tournee) -> collecte, ou rejete.
 - Statuts d'une declaration : soumise -> (planifiee si collecte a domicile) -> validee ou rejetee.
@@ -57,7 +61,8 @@ INTENTS = {
     "relais": ("relais", "point relais", "ou deposer", "deposer", "proche", "pres de moi", "adresse", "horaire"),
     "signaler": ("signaler", "signalement", "depot sauvage", "ordure", "ordures", "tas", "decharge", "sale", "photo"),
     "declarer": ("declarer", "declaration", "vendre", "revendre", "recycler", "recyclage", "collecte a domicile"),
-    "points": ("point", "points", "fidelite", "bonus", "recompense"),
+    "points": ("point", "points", "fidelite", "bonus", "recompense", "convertir", "conversion"),
+    "declarer_seuil": ("seuil", "seuil y", "minimum", "domicile"),
     "paiement": ("paiement", "paye", "payer", "argent", "gain", "gains", "gagne", "solde", "mobile money", "orange money",
                  "wave", "momo", "remuneration", "portefeuille"),
     "statut": ("statut", "suivi", "ou en est", "mes declarations", "mes signalements", "historique", "valide", "rejete"),
@@ -284,13 +289,15 @@ def local_reply(intent: str, facts: dict, user: User | None) -> str:
                 f"Quand un agent confirme ton signalement, tu gagnes **{facts.get('points_signalement', 15)} points**.")
     if intent == "declarer":
         return ("Pour revendre tes dechets recyclables :\n1. Ouvre **Declarer**\n2. Choisis *point relais* (plus de points) "
-                "ou *collecte a domicile*\n3. Ajoute chaque matiere et son poids estime\n4. Un agent pese et valide : tu es paye au tarif du jour.\n\n"
+                f"ou *collecte a domicile* (a partir de {facts['regles']['seuil_y_kg_collecte_domicile']:g} kg)\n3. Ajoute chaque matiere et son poids estime\n4. Un agent pese et valide : tu es paye au tarif du jour.\n\n"
                 f"Tarifs actuels :\n{tarif_txt}")
     if intent in ("points", "paiement") and user and "utilisateur" in facts:
         u = facts["utilisateur"]
+        rg = facts["regles"]
         return (f"Ton solde : **⭐ {u['points']} points**\n- Gains deja payes : **{_fcfa(u['gains_payes_fcfa'])}**\n"
                 f"- En attente de paiement : **{_fcfa(u['gains_en_attente_fcfa'])}**\n\n"
-                "Les points s'obtiennent en deposant en point relais et quand tes signalements sont confirmes.")
+                f"Les points s'obtiennent en deposant en point relais et quand tes signalements sont confirmes. "
+                f"1 point = {rg['valeur_point_fcfa']:g} FCFA, convertible des {rg['points_minimum_conversion']:g} points dans ton portefeuille.")
     if intent == "statut" and user and "utilisateur" in facts:
         u = facts["utilisateur"]
         if not u["dernieres_declarations"] and not u["derniers_signalements"]:
@@ -303,6 +310,11 @@ def local_reply(intent: str, facts: dict, user: User | None) -> str:
         for r in u["derniers_signalements"][:3]:
             out.append(f"- Signalement n°{r['numero']} : **{r['statut'].lower()}**")
         return "Voici ton suivi :\n" + "\n".join(out)
+    if intent == "declarer_seuil":
+        rg = facts["regles"]
+        return (f"La collecte a domicile est possible a partir de **{rg['seuil_y_kg_collecte_domicile']:g} kg** au total (seuil Y). "
+                "En dessous, un passage du camion coute plus cher que la valeur des dechets : depose-les en **point relais**, "
+                f"tu gagnes {rg['points_par_kg_point_relais']:g} points par kg + {rg['bonus_par_depot_point_relais']:g} points de bonus.")
     if intent == "tri":
         return ("Conseils pour bien preparer tes dechets :\n- **Plastique** : vide et rince les bouteilles, retire les restes\n"
                 "- **Carton** : aplatis-le et garde-le au sec\n- **Aluminium** : ecrase les canettes pour gagner de la place\n"
@@ -387,7 +399,16 @@ def answer(db: Session, *, question: str, session_id: str, user: User | None,
            lat: float | None = None, lon: float | None = None) -> dict:
     started = time.perf_counter()
     intent = detect_intent(question, user)
-    facts: dict = {"tarifs": tariffs(db), "points_signalement": int(get_param(db, "POINTS_SIGNALEMENT_CONFIRME"))}
+    facts: dict = {
+        "tarifs": tariffs(db), "points_signalement": int(get_param(db, "POINTS_SIGNALEMENT_CONFIRME")),
+        "regles": {
+            "seuil_y_kg_collecte_domicile": get_param(db, "SEUIL_Y_KG"),
+            "points_par_kg_point_relais": get_param(db, "POINTS_PAR_KG_POINT_RELAIS"),
+            "bonus_par_depot_point_relais": get_param(db, "BONUS_DEPOT_POINT_RELAIS"),
+            "valeur_point_fcfa": get_param(db, "POINT_VALEUR_FCFA"),
+            "points_minimum_conversion": get_param(db, "POINTS_MIN_CONVERSION"),
+        },
+    }
     if intent in ("relais", "estimation", "declarer") or lat is not None:
         facts["points_relais"] = nearest_relays(db, lat, lon, user)
         facts["position_connue"] = lat is not None

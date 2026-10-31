@@ -21,6 +21,9 @@ DEFAULT_PARAMETERS = {
     "VITESSE_MOYENNE_KMH": ("18", "Vitesse moyenne en ville pour estimer la duree"),
     "TEMPS_ARRET_MIN": ("10", "Temps moyen passe a chaque arret"),
     "POIDS_MAX_LIGNE_KG": ("1000", "Poids maximum declarable par ligne"),
+    "SEUIL_Y_KG": ("10", "Seuil Y : poids minimum pour une collecte a domicile ; en dessous, orientation vers un point relais"),
+    "POINT_VALEUR_FCFA": ("1", "Conversion : valeur d'un point en FCFA"),
+    "POINTS_MIN_CONVERSION": ("500", "Nombre minimum de points pour demander une conversion"),
 }
 
 # Referentiel initial des tarifs (FCFA/kg).
@@ -67,14 +70,34 @@ def add_points(db: Session, user: User, points: int, reason: str, *,
                              declaration_id=declaration_id, report_id=report_id))
 
 
-def validate_declaration(db: Session, decl: Declaration, validated: dict[int, float], agent: User) -> Declaration:
+def validate_declaration(db: Session, decl: Declaration, validated: dict[int, float], agent: User,
+                         cache: dict | None = None) -> Payment | None:
     """Valide les poids reels, calcule la remuneration au tarif du jour et attribue les points.
 
     `validated` associe l'id de chaque ligne a son poids reellement pese.
+    `cache` (facultatif) memorise tarifs et parametres pour les traitements en masse.
+    Renvoie le paiement cree (ou None si le montant est nul).
     """
     if decl.status in ("VALIDEE", "REJETEE"):
         raise HTTPException(400, f"Declaration deja {decl.status.lower()}")
-    max_kg = get_param(db, "POIDS_MAX_LIGNE_KG")
+    if cache is not None:
+        def param(key):
+            if key not in cache:
+                cache[key] = get_param(db, key)
+            return cache[key]
+
+        def tariff_for(material_id, at):
+            k = ("tarif", material_id)
+            if k not in cache:
+                cache[k] = current_tariff(db, material_id, at)
+            return cache[k]
+    else:
+        def param(key):
+            return get_param(db, key)
+
+        def tariff_for(material_id, at):
+            return current_tariff(db, material_id, at)
+    max_kg = param("POIDS_MAX_LIGNE_KG")
     total_kg, total_amount = 0.0, 0
     now = utcnow()
     for item in decl.items:
@@ -83,7 +106,7 @@ def validate_declaration(db: Session, decl: Declaration, validated: dict[int, fl
         weight = float(validated[item.id])
         if weight < 0 or weight > max_kg:
             raise HTTPException(400, f"Poids invalide pour la ligne {item.id}")
-        tariff = current_tariff(db, item.material_id, now)
+        tariff = tariff_for(item.material_id, now)
         if tariff is None:
             raise HTTPException(400, f"Aucun tarif en vigueur pour {item.material.name}")
         item.validated_weight_kg = round(weight, 2)
@@ -99,16 +122,41 @@ def validate_declaration(db: Session, decl: Declaration, validated: dict[int, fl
     decl.validated_by = agent.id
     decl.validated_at = now
 
+    payment = None
     if total_amount > 0:
-        db.add(Payment(user_id=decl.user_id, declaration_id=decl.id, amount_fcfa=total_amount))
+        payment = Payment(user_id=decl.user_id, declaration_id=decl.id, amount_fcfa=total_amount)
+        db.add(payment)
 
     # Points de fidelite : uniquement pour les apports en point relais.
     if decl.mode == "POINT_RELAIS" and total_kg > 0:
-        points = int(math.floor(total_kg * get_param(db, "POINTS_PAR_KG_POINT_RELAIS"))
-                     + get_param(db, "BONUS_DEPOT_POINT_RELAIS"))
+        points = int(math.floor(total_kg * param("POINTS_PAR_KG_POINT_RELAIS"))
+                     + param("BONUS_DEPOT_POINT_RELAIS"))
         decl.points_awarded = points
         add_points(db, decl.user, points, "Depot en point relais", declaration_id=decl.id)
-    return decl
+    return payment
+
+
+def check_seuil_y(db: Session, mode: str, total_kg: float) -> None:
+    """Seuil Y : sous ce poids, une collecte a domicile coute plus qu'elle ne rapporte."""
+    seuil = get_param(db, "SEUIL_Y_KG")
+    if mode == "COLLECTE_DOMICILE" and total_kg < seuil:
+        raise HTTPException(
+            400, f"La collecte a domicile est reservee aux apports d'au moins {seuil:g} kg (seuil Y). "
+                 "Depose plutot tes dechets dans un point relais : tu gagnes en plus des points de fidelite.")
+
+
+def convert_points(db: Session, user: User, points: int) -> Payment:
+    """Convertit des points en FCFA (verses comme une remuneration, en Mobile Money)."""
+    minimum = int(get_param(db, "POINTS_MIN_CONVERSION"))
+    if points < minimum:
+        raise HTTPException(400, f"Minimum {minimum} points pour une conversion")
+    if points > (user.points_balance or 0):
+        raise HTTPException(400, "Solde de points insuffisant")
+    amount = int(round(points * get_param(db, "POINT_VALEUR_FCFA")))
+    add_points(db, user, -points, "Conversion en FCFA")
+    pay = Payment(user_id=user.id, kind="CONVERSION_POINTS", points_converted=points, amount_fcfa=amount)
+    db.add(pay)
+    return pay
 
 
 def confirm_report(db: Session, report: Report) -> None:

@@ -1,8 +1,9 @@
 """Optimisation des circuits de collecte.
 
 Heuristique plus proche voisin puis amelioration 2-opt sur distances a vol d'oiseau
-(haversine). Suffisant pour quelques dizaines d'arrets ; pour des distances routieres
-reelles, brancher un moteur comme OSRM a la place de `haversine_km`.
+(haversine), avec matrice de distances et calcul incremental du gain : rapide jusqu'a
+plusieurs centaines d'arrets. Pour des distances routieres reelles, remplacer la matrice
+par celle d'un moteur comme OSRM.
 """
 import math
 
@@ -17,38 +18,40 @@ def haversine_km(a: tuple[float, float], b: tuple[float, float]) -> float:
     return 2 * EARTH_RADIUS_KM * math.asin(math.sqrt(h))
 
 
-def _tour_length(points: list[tuple[float, float]], order: list[int]) -> float:
-    # order commence et finit implicitement au depot (indice 0)
-    path = [0, *order, 0]
-    return sum(haversine_km(points[path[i]], points[path[i + 1]]) for i in range(len(path) - 1))
-
-
-def optimize_route(depot: tuple[float, float], stops: list[tuple[float, float]]) -> dict:
+def optimize_route(depot: tuple[float, float], stops: list[tuple[float, float]], max_passes: int = 50) -> dict:
     """Renvoie l'ordre de visite optimise (indices dans `stops`) et la distance totale aller-retour."""
     if not stops:
         return {"order": [], "distance_km": 0.0, "legs_km": []}
-    points = [depot, *stops]
-    remaining = set(range(1, len(points)))
-    order, current = [], 0
+    pts = [depot, *stops]
+    n = len(pts)
+    dist = [[haversine_km(pts[i], pts[j]) for j in range(n)] for i in range(n)]
+
+    # 1. Plus proche voisin depuis le depot
+    remaining = set(range(1, n))
+    path, current = [0], 0
     while remaining:
-        nxt = min(remaining, key=lambda j: haversine_km(points[current], points[j]))
-        order.append(nxt)
+        nxt = min(remaining, key=lambda j: dist[current][j])
+        path.append(nxt)
         remaining.remove(nxt)
         current = nxt
+    path.append(0)
 
-    improved = True
-    while improved:
+    # 2. 2-opt : inverse un segment si cela raccourcit le circuit
+    for _ in range(max_passes):
         improved = False
-        for i in range(len(order) - 1):
-            for k in range(i + 1, len(order)):
-                candidate = order[:i] + order[i:k + 1][::-1] + order[k + 1:]
-                if _tour_length(points, candidate) + 1e-9 < _tour_length(points, order):
-                    order, improved = candidate, True
+        for i in range(1, len(path) - 2):
+            for k in range(i + 1, len(path) - 1):
+                a, b, c, d = path[i - 1], path[i], path[k], path[k + 1]
+                if dist[a][c] + dist[b][d] - dist[a][b] - dist[c][d] < -1e-9:
+                    path[i:k + 1] = path[i:k + 1][::-1]
+                    improved = True
+        if not improved:
+            break
 
-    path = [0, *order]
-    legs = [haversine_km(points[path[i]], points[path[i + 1]]) for i in range(len(path) - 1)]
+    legs = [dist[path[i]][path[i + 1]] for i in range(len(path) - 2)]  # sans le retour au depot
+    total = sum(dist[path[i]][path[i + 1]] for i in range(len(path) - 1))
     return {
-        "order": [i - 1 for i in order],
-        "distance_km": round(_tour_length(points, order), 2),
+        "order": [p - 1 for p in path[1:-1]],
+        "distance_km": round(total, 2),
         "legs_km": [round(x, 2) for x in legs],
     }

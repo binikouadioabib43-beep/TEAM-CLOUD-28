@@ -88,6 +88,7 @@ def relay_out(p: RelayPoint) -> dict:
 def payment_out(p: Payment) -> dict:
     return {
         "id": p.id, "user_id": p.user_id, "user": p.user.full_name if p.user else None,
+        "kind": p.kind, "points_converted": p.points_converted,
         "declaration_id": p.declaration_id, "amount_fcfa": p.amount_fcfa, "status": p.status,
         "method": p.method, "reference": p.reference,
         "created_at": iso(p.created_at), "paid_at": iso(p.paid_at),

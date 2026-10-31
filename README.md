@@ -8,6 +8,12 @@ Application de gestion et de valorisation des déchets à Abidjan (Côte d'Ivoir
 - **Agents** : confirment les signalements, pèsent et valident les déclarations, réalisent des tournées optimisées.
 - **Administrateurs** : tableau de bord, tarifs (avec historique), paramètres, paiements, synchronisation Snowflake.
 
+## Projet pilote (hackathon)
+
+4 communes (Yopougon, Abobo, Cocody, Koumassi), **500 ménages, 200 commerçants** et 150 citoyens simulés sur 3 mois : 48,7 t recyclées, 11,7 M FCFA versés. Seuil Y = 10 kg, barème et conversion des points sont définis et justifiés dans [docs/regles_et_simulation.md](docs/regles_et_simulation.md). La simulation existe aussi dans Snowflake (GENERATOR + GEOGRAPHY) : [snowflake/06_simulation_generator.sql](snowflake/06_simulation_generator.sql).
+
+Relancer la simulation locale : `python -m backend.app.simulate`
+
 ## Architecture
 
 | Couche | Technologie | Rôle |

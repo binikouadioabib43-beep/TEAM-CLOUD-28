@@ -31,6 +31,7 @@ class Commune(Base):
     latitude: Mapped[float] = mapped_column(Float)
     longitude: Mapped[float] = mapped_column(Float)
     population: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    is_pilot: Mapped[bool] = mapped_column(Boolean, default=False)  # commune du projet pilote
 
 
 class User(Base):
@@ -208,11 +209,13 @@ class DeclarationItem(Base):
 
 
 class Payment(Base):
-    """Remuneration due a un usager apres validation d'une declaration."""
+    """Somme due a un usager : remuneration d'une declaration ou conversion de points."""
     __tablename__ = "payments"
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
-    declaration_id: Mapped[int] = mapped_column(ForeignKey("declarations.id"), unique=True)
+    kind: Mapped[str] = mapped_column(String(20), default="REMUNERATION")  # REMUNERATION | CONVERSION_POINTS
+    declaration_id: Mapped[int | None] = mapped_column(ForeignKey("declarations.id"), unique=True, nullable=True)
+    points_converted: Mapped[int | None] = mapped_column(Integer, nullable=True)
     amount_fcfa: Mapped[int] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(20), default="EN_ATTENTE")
     method: Mapped[str] = mapped_column(String(30), default="MOBILE_MONEY")

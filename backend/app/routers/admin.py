@@ -1,4 +1,5 @@
 """Espace agents et administrateurs : validation, tarifs, collectes, tableau de bord, Snowflake."""
+import re
 from collections import defaultdict
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -19,7 +20,9 @@ from ..security import require_roles
 from ..serializers import (
     collection_out, declaration_out, payment_out, relay_out, report_out, tariff_out, user_out,
 )
-from ..services.business import confirm_report, get_param, set_tariff, validate_declaration
+from ..services.business import (
+    confirm_report, current_tariff, get_param, set_tariff, validate_declaration,
+)
 from ..services.routing import optimize_route
 
 router = APIRouter(prefix="/api/admin")
@@ -307,25 +310,31 @@ def add_cost(col_id: int, data: CollectionCostIn, _: User = Depends(staff), db: 
 
 @router.get("/dashboard")
 def dashboard(_: User = Depends(staff), db: Session = Depends(get_db)):
-    reports = list(db.scalars(select(Report)))
+    # Lecture de colonnes seulement (pas d'objets complets) : rapide meme avec des milliers de lignes
+    reports = db.execute(select(Report.status, Report.created_at, Report.commune_id,
+                                Report.ai_estimated_weight_kg, Report.validated_weight_kg)).all()
     items = db.execute(
-        select(DeclarationItem, Declaration, Material)
+        select(Material.name, DeclarationItem.validated_weight_kg, DeclarationItem.amount_fcfa,
+               func.coalesce(Declaration.validated_at, Declaration.created_at))
         .join(Declaration, DeclarationItem.declaration_id == Declaration.id)
         .join(Material, DeclarationItem.material_id == Material.id)
         .where(Declaration.status == "VALIDEE")
     ).all()
-    payments = list(db.scalars(select(Payment)))
-    declarations = list(db.scalars(select(Declaration)))
-    collections = list(db.scalars(select(Collection)))
+    pay_sums = dict(db.execute(select(Payment.status, func.sum(Payment.amount_fcfa)).group_by(Payment.status)).all())
+    declarations = db.execute(select(Declaration.status, Declaration.mode, Declaration.total_estimated_kg,
+                                     Declaration.total_validated_kg)).all()
+    real_cost_by_col = dict(db.execute(select(CollectionCost.collection_id, func.sum(CollectionCost.amount_fcfa))
+                                       .group_by(CollectionCost.collection_id)).all())
+    collections = db.execute(select(Collection.id, Collection.estimated_cost_fcfa)).all()
 
     status_counts = defaultdict(int)
     for r in reports:
         status_counts[r.status] += 1
 
     by_material = defaultdict(lambda: {"kg": 0.0, "amount_fcfa": 0})
-    for item, _, mat in items:
-        by_material[mat.name]["kg"] += item.validated_weight_kg or 0
-        by_material[mat.name]["amount_fcfa"] += item.amount_fcfa or 0
+    for name, kg_val, amount, _ in items:
+        by_material[name]["kg"] += kg_val or 0
+        by_material[name]["amount_fcfa"] += amount or 0
     kg_recycled = sum(v["kg"] for v in by_material.values())
 
     now = utcnow()
@@ -338,11 +347,11 @@ def dashboard(_: User = Depends(staff), db: Session = Depends(get_db)):
         key = r.created_at.strftime("%Y-%m")
         if key in monthly:
             monthly[key]["reports"] += 1
-    for item, decl, _ in items:
-        key = (decl.validated_at or decl.created_at).strftime("%Y-%m")
+    for _, kg_val, amount, when in items:
+        key = when.strftime("%Y-%m")
         if key in monthly:
-            monthly[key]["kg"] += item.validated_weight_kg or 0
-            monthly[key]["amount_fcfa"] += item.amount_fcfa or 0
+            monthly[key]["kg"] += kg_val or 0
+            monthly[key]["amount_fcfa"] += amount or 0
 
     communes = {c.id: c.name for c in db.scalars(select(Commune))}
     by_commune = defaultdict(lambda: {"reports": 0, "open": 0})
@@ -360,9 +369,10 @@ def dashboard(_: User = Depends(staff), db: Session = Depends(get_db)):
     decl_ratio = (sum(d.total_validated_kg or 0 for d in validated_decls)
                   / sum(d.total_estimated_kg for d in validated_decls)) if validated_decls else None
 
-    real_costs = sum(sum(x.amount_fcfa for x in c.costs) or c.estimated_cost_fcfa for c in collections)
+    real_costs = sum(real_cost_by_col.get(cid) or est for cid, est in collections)
     relay_count = sum(1 for d in declarations if d.mode == "POINT_RELAIS")
-    points_total = db.scalar(select(func.coalesce(func.sum(PointsTransaction.points), 0)))
+    points_total = db.scalar(select(func.coalesce(func.sum(PointsTransaction.points), 0))
+                             .where(PointsTransaction.points > 0))
 
     return {
         "kpis": {
@@ -372,8 +382,8 @@ def dashboard(_: User = Depends(staff), db: Session = Depends(get_db)):
             "declarations_total": len(declarations),
             "declarations_pending": sum(1 for d in declarations if d.status in ("SOUMISE", "PLANIFIEE")),
             "kg_recycled": round(kg_recycled, 1),
-            "amount_paid_fcfa": sum(p.amount_fcfa for p in payments if p.status == "PAYEE"),
-            "amount_pending_fcfa": sum(p.amount_fcfa for p in payments if p.status == "EN_ATTENTE"),
+            "amount_paid_fcfa": int(pay_sums.get("PAYEE") or 0),
+            "amount_pending_fcfa": int(pay_sums.get("EN_ATTENTE") or 0),
             "points_distributed": int(points_total or 0),
             "users_total": db.scalar(select(func.count(User.id))),
             "relay_share_pct": round(relay_count / len(declarations) * 100, 1) if declarations else 0,
@@ -391,6 +401,100 @@ def dashboard(_: User = Depends(staff), db: Session = Depends(get_db)):
     }
 
 
+# --- Projet pilote -------------------------------------------------------------------
+
+def business_rules(db: Session) -> dict:
+    """Regles chiffrees et leur justification, calculees a partir des parametres en vigueur."""
+    seuil = get_param(db, "SEUIL_Y_KG")
+    stop_cost = get_param(db, "COUT_MAIN_OEUVRE_FCFA_ARRET") + 2 * get_param(db, "COUT_CARBURANT_FCFA_KM")
+    prices = {}
+    for m in db.scalars(select(Material).where(Material.is_recyclable)):
+        t = current_tariff(db, m.id)
+        if t:
+            prices[m.name] = t.price_fcfa_per_kg
+    avg_price = sum(prices.values()) / len(prices) if prices else 0
+    pts_kg = get_param(db, "POINTS_PAR_KG_POINT_RELAIS")
+    bonus = get_param(db, "BONUS_DEPOT_POINT_RELAIS")
+    pt_val = get_param(db, "POINT_VALEUR_FCFA")
+    min_conv = get_param(db, "POINTS_MIN_CONVERSION")
+    cost_kg_at_y = stop_cost / seuil if seuil else 0
+    return {
+        "bareme": {
+            "tarifs_fcfa_kg": prices,
+            "justification": "Tarifs de reference fixes par matiere (aluminium > plastique > carton, selon la valeur de revente "
+                             "des matieres). La remuneration porte sur le poids PESE par l'agent, au tarif du jour, pour "
+                             "eviter la fraude sur les poids declares. Tarifs modifiables, historique conserve.",
+        },
+        "seuil_y": {
+            "valeur_kg": seuil,
+            "cout_arret_domicile_fcfa": round(stop_cost),
+            "cout_logistique_par_kg_au_seuil": round(cost_kg_at_y),
+            "part_du_prix_moyen_pct": round(cost_kg_at_y / avg_price * 100) if avg_price else None,
+            "justification": f"Un arret de collecte a domicile coute environ {round(stop_cost)} FCFA (main d'oeuvre + ~2 km de detour). "
+                             f"A {seuil:g} kg, cela represente {round(cost_kg_at_y)} FCFA/kg, soit "
+                             f"{round(cost_kg_at_y / avg_price * 100) if avg_price else '?'} % du prix moyen de rachat ({round(avg_price)} FCFA/kg). "
+                             f"En dessous de Y, le cout logistique depasse ce niveau : l'usager est oriente vers un point relais.",
+        },
+        "points": {
+            "points_par_kg": pts_kg, "bonus_par_depot": bonus,
+            "points_signalement": get_param(db, "POINTS_SIGNALEMENT_CONFIRME"),
+            "valeur_point_fcfa": pt_val, "minimum_conversion": min_conv,
+            "justification": f"Un depot de 5 kg en point relais rapporte {int(5 * pts_kg + bonus)} points, soit "
+                             f"{int((5 * pts_kg + bonus) * pt_val)} FCFA : c'est bien moins que les {round(stop_cost)} FCFA "
+                             f"economises en evitant un arret a domicile. 1 point = {pt_val:g} FCFA, convertible a partir de "
+                             f"{min_conv:g} points pour limiter les micro-virements Mobile Money.",
+        },
+    }
+
+
+@router.get("/pilot")
+def pilot(_: User = Depends(staff), db: Session = Depends(get_db)):
+    pilots = list(db.scalars(select(Commune).where(Commune.is_pilot).order_by(Commune.name)))
+    ids = [c.id for c in pilots]
+    users_by = defaultdict(lambda: defaultdict(int))
+    for cid, role, n in db.execute(select(User.commune_id, User.role, func.count())
+                                   .where(User.commune_id.in_(ids)).group_by(User.commune_id, User.role)):
+        users_by[cid][role] = n
+    decl_by = {cid: (n, kg or 0, fcfa or 0, pts or 0) for cid, n, kg, fcfa, pts in db.execute(
+        select(User.commune_id, func.count(Declaration.id), func.sum(Declaration.total_validated_kg),
+               func.sum(Declaration.total_amount_fcfa), func.sum(Declaration.points_awarded))
+        .join(User, Declaration.user_id == User.id).where(User.commune_id.in_(ids))
+        .group_by(User.commune_id))}
+    relay_by = dict(db.execute(
+        select(User.commune_id, func.count(Declaration.id)).join(User, Declaration.user_id == User.id)
+        .where(User.commune_id.in_(ids), Declaration.mode == "POINT_RELAIS").group_by(User.commune_id)).all())
+    reports_by = dict(db.execute(select(Report.commune_id, func.count(Report.id))
+                                 .where(Report.commune_id.in_(ids)).group_by(Report.commune_id)).all())
+    first = db.scalar(select(func.min(Declaration.created_at)))
+    months = max(((utcnow() - first).days / 30) if first else 1, 1)
+    role_income = {}
+    for role in ("menage", "commercant"):
+        total, active = db.execute(
+            select(func.coalesce(func.sum(Declaration.total_amount_fcfa), 0), func.count(func.distinct(Declaration.user_id)))
+            .join(User, Declaration.user_id == User.id)
+            .where(User.role == role, Declaration.status == "VALIDEE")).one()
+        role_income[role] = round(total / active / months) if active else 0
+
+    rows = []
+    for c in pilots:
+        n, kg, fcfa, pts = decl_by.get(c.id, (0, 0, 0, 0))
+        rows.append({
+            "commune": c.name, "menages": users_by[c.id]["menage"], "commercants": users_by[c.id]["commercant"],
+            "citoyens": users_by[c.id]["citoyen"], "declarations": n, "kg_valides": round(kg, 1),
+            "fcfa_remuneres": int(fcfa), "points_attribues": int(pts),
+            "part_point_relais_pct": round(relay_by.get(c.id, 0) / n * 100, 1) if n else 0,
+            "signalements": reports_by.get(c.id, 0),
+        })
+    totals = {k: sum(r[k] for r in rows) for k in ("menages", "commercants", "citoyens", "declarations",
+                                                    "kg_valides", "fcfa_remuneres", "points_attribues", "signalements")}
+    totals["kg_valides"] = round(totals["kg_valides"], 1)
+    return {
+        "communes": rows, "totaux": totals, "duree_mois": round(months, 1),
+        "revenu_mensuel_moyen_fcfa": {"menage_actif": role_income["menage"], "commercant_actif": role_income["commercant"]},
+        "regles": business_rules(db),
+    }
+
+
 # --- Snowflake -----------------------------------------------------------------------
 
 def _snowflake_public_config() -> dict:
@@ -398,10 +502,36 @@ def _snowflake_public_config() -> dict:
     return {
         "account": sf["account"], "user": sf["user"], "role": sf["role"],
         "warehouse": sf["warehouse"], "database": sf["database"], "schema": sf["schema"],
-        "authenticator": sf["authenticator"] or ("snowflake" if sf["password"] else None),
+        "authenticator": "keypair" if sf["private_key_file"] else (
+            sf["authenticator"] or ("snowflake" if sf["password"] else None)),
+        "key_generated": KEY_FILE.exists(),
         "has_password": bool(sf["password"]), "configured": settings.snowflake_configured,
         "ai_provider": settings.ai_provider,
     }
+
+
+KEY_FILE = settings.data_dir / "snowflake_rsa_key.p8"
+
+
+@router.post("/snowflake/keypair")
+def generate_keypair(user: str | None = None, _: User = Depends(admin_only)):
+    """Genere une paire de cles RSA : la cle privee reste sur ce PC (dossier data, ignore par Git),
+    la cle publique est a enregistrer dans Snowflake avec ALTER USER."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    if not KEY_FILE.exists():
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        KEY_FILE.write_bytes(key.private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+    key = serialization.load_pem_private_key(KEY_FILE.read_bytes(), password=None)
+    pem = key.public_key().public_bytes(serialization.Encoding.PEM,
+                                        serialization.PublicFormat.SubjectPublicKeyInfo).decode()
+    body = "".join(l for l in pem.splitlines() if "PUBLIC KEY" not in l)
+    target = (user or settings.snowflake["user"] or "<TON_UTILISATEUR>").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.@\-<>]+", target):
+        raise HTTPException(400, "Nom d'utilisateur invalide")
+    return {"public_key": body, "sql": f"ALTER USER \"{target.upper()}\" SET RSA_PUBLIC_KEY='{body}';"}
 
 
 @router.get("/snowflake/config")
@@ -415,7 +545,14 @@ def set_snowflake_config(data: SnowflakeConfigIn, _: User = Depends(admin_only))
     values = data.model_dump(by_alias=True, exclude={"password", "use_cortex_for_photos"})
     values["account"] = values["account"].strip()
     values["user"] = values["user"].strip()
-    if data.authenticator == "externalbrowser":
+    values["private_key_file"] = None
+    if data.authenticator == "keypair":
+        if not KEY_FILE.exists():
+            raise HTTPException(400, "Genere d'abord la cle (bouton « Generer ma cle »)")
+        values["authenticator"] = None
+        values["password"] = None
+        values["private_key_file"] = str(KEY_FILE)
+    elif data.authenticator == "externalbrowser":
         values["password"] = None  # jamais de mot de passe stocke en mode navigateur
     elif data.password:
         values["password"] = data.password
@@ -433,6 +570,17 @@ def set_snowflake_config(data: SnowflakeConfigIn, _: User = Depends(admin_only))
 def snowflake_diagnostics(_: User = Depends(admin_only)):
     from ..services.snowflake_client import run_diagnostics
     return run_diagnostics()
+
+
+@router.post("/snowflake/setup")
+def snowflake_setup(_: User = Depends(admin_only)):
+    from ..services.snowflake_client import SnowflakeNotConfigured, run_setup_scripts
+    try:
+        return run_setup_scripts()
+    except SnowflakeNotConfigured as exc:
+        raise HTTPException(400, str(exc))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"Erreur Snowflake : {exc}")
 
 
 @router.post("/snowflake/sync")

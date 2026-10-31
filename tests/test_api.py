@@ -78,15 +78,20 @@ def test_declaration_validation_pays_and_awards_points(client, agent):
     assert again.status_code == 400
 
 
-def test_home_collection_needs_gps_and_gets_no_points(client, agent):
+def test_home_collection_needs_gps_seuil_y_and_gets_no_points(client, agent):
     user = _register(client, "commerce@test.ci", role="commercant", business_name="Boutique Test")
     mats = _materials(client)
     bad = client.post("/api/declarations", headers=user, json={
-        "mode": "COLLECTE_DOMICILE", "items": [{"material_id": mats["PLASTIQUE"]["id"], "estimated_weight_kg": 5}]})
+        "mode": "COLLECTE_DOMICILE", "items": [{"material_id": mats["PLASTIQUE"]["id"], "estimated_weight_kg": 12}]})
     assert bad.status_code == 400
+    # sous le seuil Y (10 kg), la collecte a domicile est refusee
+    below = client.post("/api/declarations", headers=user, json={
+        "mode": "COLLECTE_DOMICILE", "latitude": 5.30, "longitude": -4.00,
+        "items": [{"material_id": mats["PLASTIQUE"]["id"], "estimated_weight_kg": 5}]})
+    assert below.status_code == 400 and "seuil Y" in below.json()["detail"]
     ok = client.post("/api/declarations", headers=user, json={
         "mode": "COLLECTE_DOMICILE", "latitude": 5.30, "longitude": -4.00,
-        "items": [{"material_id": mats["PLASTIQUE"]["id"], "estimated_weight_kg": 5}]}).json()
+        "items": [{"material_id": mats["PLASTIQUE"]["id"], "estimated_weight_kg": 12}]}).json()
     v = client.post(f"/api/admin/declarations/{ok['id']}/validate", headers=agent,
                     json={"items": [{"item_id": ok["items"][0]["id"], "validated_weight_kg": 4}]}).json()
     assert v["total_amount_fcfa"] == 1000
@@ -201,6 +206,34 @@ def test_snowflake_not_configured_returns_clear_message(client, admin):
     assert r.status_code == 400
     assert client.put("/api/admin/snowflake/config", headers=admin,
                       json={"account": "bad account!", "user": "moi"}).status_code == 422
+
+
+def test_pilot_simulation_meets_hackathon_constraints(client, admin):
+    p = client.get("/api/admin/pilot", headers=admin).json()
+    assert len(p["communes"]) >= 4
+    assert {"Cocody", "Yopougon", "Abobo", "Koumassi"} <= {c["commune"] for c in p["communes"]}
+    assert p["totaux"]["menages"] >= 500 and p["totaux"]["commercants"] >= 200
+    assert p["regles"]["seuil_y"]["valeur_kg"] == 10
+    assert "justification" in p["regles"]["points"]
+
+
+def test_points_conversion(client, agent):
+    user = _register(client, "convertisseur@test.ci")
+    me = client.get("/api/me", headers=user).json()
+    assert client.post("/api/wallet/convert", headers=user, json={"points": 500}).status_code == 400  # solde vide
+    # gagne des points : 60 kg en point relais -> 60*10 + 20 = 620 points
+    mats = _materials(client)
+    relay = client.get("/api/relay-points").json()[0]
+    d = client.post("/api/declarations", headers=user, json={
+        "mode": "POINT_RELAIS", "relay_point_id": relay["id"],
+        "items": [{"material_id": mats["CARTON"]["id"], "estimated_weight_kg": 60}]}).json()
+    client.post(f"/api/admin/declarations/{d['id']}/validate", headers=agent,
+                json={"items": [{"item_id": d["items"][0]["id"], "validated_weight_kg": 60}]})
+    assert client.get("/api/me", headers=user).json()["points_balance"] == me["points_balance"] + 620
+    assert client.post("/api/wallet/convert", headers=user, json={"points": 400}).status_code == 400  # < minimum
+    pay = client.post("/api/wallet/convert", headers=user, json={"points": 600}).json()
+    assert pay["kind"] == "CONVERSION_POINTS" and pay["amount_fcfa"] == 600 and pay["status"] == "EN_ATTENTE"
+    assert client.get("/api/me", headers=user).json()["points_balance"] == 20
 
 
 def test_route_optimizer_visits_every_stop_once():

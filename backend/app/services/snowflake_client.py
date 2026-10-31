@@ -1,6 +1,7 @@
 """Acces Snowflake : connexion, diagnostic de l'environnement et synchronisation analytique."""
 import json
 from datetime import date, datetime
+from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -118,6 +119,54 @@ SYNC_MODELS = [
 ]
 # Colonnes jamais envoyees vers l'entrepot analytique.
 EXCLUDED_COLUMNS = {"users": {"password_hash", "email", "phone"}}
+
+
+SETUP_SCRIPTS = ("01_setup.sql", "02_tables.sql", "04_analytics_views.sql", "06_simulation_generator.sql")
+
+
+def run_setup_scripts() -> dict:
+    """Execute les scripts d'installation avec le role de la connexion (USE ROLE retire).
+
+    Chaque instruction est executee separement : une erreur (ex. droit manquant) est
+    notee sans bloquer la suite. Renvoie le bilan et la synthese de la simulation.
+    """
+    from snowflake.connector.util_text import split_statements
+    import io
+    import re as _re
+
+    from ..config import BASE_DIR
+
+    conn = connect()
+    report = {"scripts": [], "synthese": [], "controles": []}
+    try:
+        cur = conn.cursor()
+        role = cur.execute("SELECT CURRENT_ROLE()").fetchone()[0]
+        for name in SETUP_SCRIPTS:
+            sql = (BASE_DIR / "snowflake" / name).read_text(encoding="utf-8")
+            sql = _re.sub(r"(?im)^\s*USE ROLE [^;]+;", "", sql)
+            ok, errors = 0, []
+            for stmt, _ in split_statements(io.StringIO(sql), remove_comments=True):
+                if not stmt.strip():
+                    continue
+                try:
+                    cur.execute(stmt)
+                    ok += 1
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(f"{stmt.strip()[:70]}… → {str(exc).splitlines()[0][:200]}")
+            report["scripts"].append({"script": name, "ok": ok, "erreurs": errors})
+        cur.execute("USE SCHEMA ECOABIDJAN.SIM")
+        cols = None
+        for row in cur.execute("SELECT * FROM V_SYNTHESE_COMMUNE ORDER BY MENAGES DESC"):
+            cols = cols or [c[0] for c in cur.description]
+            report["synthese"].append(dict(zip(cols, [float(v) if isinstance(v, Decimal) else v for v in row])))
+        for row in cur.execute(
+                "SELECT 'Communes pilotes', COUNT(*) FROM COMMUNES_PILOTES UNION ALL "
+                "SELECT 'Menages', COUNT(*) FROM MENAGES UNION ALL SELECT 'Commercants', COUNT(*) FROM COMMERCANTS"):
+            report["controles"].append({"controle": row[0], "valeur": row[1]})
+        report["role"] = role
+    finally:
+        conn.close()
+    return report
 
 
 def _value(v):

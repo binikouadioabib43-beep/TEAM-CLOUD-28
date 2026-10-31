@@ -5,6 +5,7 @@ from io import BytesIO
 from pathlib import Path
 
 import jwt
+from pydantic import BaseModel, Field
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from PIL import Image, UnidentifiedImageError
@@ -21,7 +22,7 @@ from ..schemas import DeclarationIn
 from ..security import get_current_user, require_roles
 from ..serializers import declaration_out, iso, payment_out, report_out
 from ..services.ai import analyze_photo
-from ..services.business import current_tariff
+from ..services.business import check_seuil_y, convert_points, current_tariff, get_param
 from ..services.routing import haversine_km
 
 router = APIRouter(prefix="/api")
@@ -151,6 +152,7 @@ def create_declaration(
         seen.add(mat.id)
         decl.items.append(DeclarationItem(material_id=mat.id, estimated_weight_kg=item.estimated_weight_kg))
     decl.total_estimated_kg = round(sum(i.estimated_weight_kg for i in data.items), 2)
+    check_seuil_y(db, data.mode, decl.total_estimated_kg)
     db.add(decl)
     db.commit()
     db.refresh(decl)
@@ -180,6 +182,31 @@ def estimate(data: DeclarationIn, db: Session = Depends(get_db)):
     return {"lines": lines, "total_fcfa": total}
 
 
+class ConvertIn(BaseModel):
+    points: int = Field(gt=0, le=1_000_000)
+
+
+@router.post("/wallet/convert", status_code=201)
+def convert(data: ConvertIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    pay = convert_points(db, user, data.points)
+    db.commit()
+    db.refresh(pay)
+    return payment_out(pay)
+
+
+@router.get("/rules")
+def rules(db: Session = Depends(get_db)):
+    """Regles metier publiques (affichees dans l'appli et utilisees par l'assistant)."""
+    return {
+        "seuil_y_kg": get_param(db, "SEUIL_Y_KG"),
+        "points_par_kg_point_relais": get_param(db, "POINTS_PAR_KG_POINT_RELAIS"),
+        "bonus_depot_point_relais": get_param(db, "BONUS_DEPOT_POINT_RELAIS"),
+        "points_signalement_confirme": get_param(db, "POINTS_SIGNALEMENT_CONFIRME"),
+        "point_valeur_fcfa": get_param(db, "POINT_VALEUR_FCFA"),
+        "points_min_conversion": get_param(db, "POINTS_MIN_CONVERSION"),
+    }
+
+
 @router.get("/wallet")
 def wallet(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     payments = list(db.scalars(select(Payment).where(Payment.user_id == user.id)
@@ -188,6 +215,8 @@ def wallet(user: User = Depends(get_current_user), db: Session = Depends(get_db)
                         .order_by(PointsTransaction.created_at.desc()).limit(50))
     return {
         "points_balance": user.points_balance,
+        "point_value_fcfa": get_param(db, "POINT_VALEUR_FCFA"),
+        "points_min_conversion": int(get_param(db, "POINTS_MIN_CONVERSION")),
         "total_earned_fcfa": sum(p.amount_fcfa for p in payments if p.status != "ANNULEE"),
         "paid_fcfa": sum(p.amount_fcfa for p in payments if p.status == "PAYEE"),
         "pending_fcfa": sum(p.amount_fcfa for p in payments if p.status == "EN_ATTENTE"),

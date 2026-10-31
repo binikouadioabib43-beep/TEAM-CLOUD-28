@@ -113,7 +113,7 @@ class StopUpdateIn(BaseModel):
 class SnowflakeConfigIn(BaseModel):
     account: str = Field(min_length=3, max_length=120, pattern=r"^[A-Za-z0-9_.\-]+$")
     user: str = Field(min_length=1, max_length=120)
-    authenticator: Literal["externalbrowser", "snowflake"] = "externalbrowser"
+    authenticator: Literal["keypair", "externalbrowser", "snowflake"] = "keypair"
     password: str | None = Field(default=None, max_length=256)
     role: str | None = Field(default=None, max_length=120)
     warehouse: str | None = Field(default=None, max_length=120)

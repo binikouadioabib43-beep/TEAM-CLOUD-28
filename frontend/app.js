@@ -6,7 +6,10 @@ const STAFF = ["agent", "admin"];
 const state = { token: null, user: null, materials: [], communes: [], relays: [], charts: [], maps: [] };
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
-const view = $("#view");
+const viewRoot = $("#view");
+// Chaque navigation ecrit dans un nouveau conteneur : une page lente qui finit de charger
+// apres un changement d'onglet ecrit dans un conteneur detache et ne s'affiche donc pas.
+let view = viewRoot;
 
 try { state.token = localStorage.getItem("eco_token"); } catch { /* stockage indisponible */ }
 
@@ -126,7 +129,7 @@ const USER_ROUTES = [
   ["relais", "Points relais"], ["portefeuille", "Portefeuille"], ["historique", "Historique"],
 ];
 const STAFF_ROUTES = [
-  ["dashboard", "Tableau de bord"], ["signalements", "Signalements"], ["validations", "Declarations"],
+  ["dashboard", "Tableau de bord"], ["pilote", "Projet pilote"], ["signalements", "Signalements"], ["validations", "Declarations"],
   ["tournees", "Tournees"], ["paiements", "Paiements"], ["tarifs", "Tarifs & parametres"], ["snowflake", "Snowflake"],
 ];
 
@@ -153,6 +156,8 @@ function renderChrome() {
 
 async function router() {
   cleanup();
+  view = document.createElement("div");
+  viewRoot.replaceChildren(view);
   if (!state.user) return renderAuth();
   const allowed = routes().map((r) => r[0]);
   let r = location.hash.slice(1);
@@ -350,8 +355,9 @@ VIEWS.declarer = async () => {
         <label>Mode de remise</label>
         <div class="row">
           <label class="small"><input type="radio" name="mode" value="POINT_RELAIS" checked style="width:auto"> Je depose en point relais (+ points)</label>
-          <label class="small"><input type="radio" name="mode" value="COLLECTE_DOMICILE" style="width:auto"> Collecte a domicile</label>
+          <label class="small"><input type="radio" name="mode" value="COLLECTE_DOMICILE" style="width:auto"> Collecte a domicile (des <span id="seuil-y">10</span> kg)</label>
         </div>
+        <p class="small muted" id="seuil-note" hidden>La collecte a domicile demande au moins <strong id="seuil-y2"></strong> kg au total (seuil Y). En dessous, depose en point relais : tu gagnes aussi des points.</p>
         <div id="relay-box">
           <label for="relay">Point relais</label><select id="relay"></select>
           <button type="button" class="btn ghost sm" id="near" style="margin-top:6px">📍 Trier par distance</button>
@@ -401,7 +407,13 @@ VIEWS.declarer = async () => {
   const recalc = () => {
     const total = lines().reduce((s, l) => s + (mats.find((m) => m.id === l.material_id)?.price_fcfa_per_kg || 0) * (l.estimated_weight_kg || 0), 0);
     $("#total").textContent = fcfa(total);
+    const kgTotal = lines().reduce((s, l) => s + (l.estimated_weight_kg || 0), 0);
+    const home = $("input[name=mode]:checked").value === "COLLECTE_DOMICILE";
+    $("#seuil-note").hidden = !(home && kgTotal < seuilY);
   };
+  let seuilY = 10;
+  api("/api/rules").then((r) => { seuilY = r.seuil_y_kg; $("#seuil-y").textContent = seuilY; $("#seuil-y2").textContent = seuilY; recalc(); }).catch(() => {});
+  $$("input[name=mode]").forEach((r) => r.addEventListener("change", () => recalc()));
   $("#add").onclick = addRow;
   addRow();
   $("#f-decl").onsubmit = (e) => {
@@ -452,15 +464,29 @@ VIEWS.portefeuille = async () => {
       <div class="kpi"><div class="label">Deja paye</div><div class="value">${fcfa(w.paid_fcfa)}</div></div>
       <div class="kpi"><div class="label">En attente</div><div class="value">${fcfa(w.pending_fcfa)}</div></div>
     </div>
+    <div class="card"><h2>Convertir mes points</h2>
+      <p>1 point = <strong>${w.point_value_fcfa} FCFA</strong>, a partir de <strong>${num(w.points_min_conversion)} points</strong>. Le montant est verse en Mobile Money.</p>
+      ${w.points_balance >= w.points_min_conversion
+        ? `<div class="row"><div><label for="cv-pts">Points a convertir</label><input id="cv-pts" type="number" min="${w.points_min_conversion}" max="${w.points_balance}" step="100" value="${Math.floor(w.points_balance / 100) * 100}"></div>
+           <div><button class="btn" id="cv-go">Convertir</button></div></div>`
+        : `<p class="muted">Encore ${num(w.points_min_conversion - w.points_balance)} points avant ta premiere conversion.</p>`}
+    </div>
     <div class="grid grid-2">
       <div class="card"><h2>Remunerations</h2><div class="table-wrap"><table>
         <tr><th>Date</th><th>Declaration</th><th class="num">Montant</th><th>Statut</th></tr>
-        ${w.payments.map((p) => `<tr><td>${dt(p.created_at)}</td><td>n°${p.declaration_id}</td><td class="num">${fcfa(p.amount_fcfa)}</td><td>${badge(p.status)}${p.reference ? `<div class="small muted">${esc(p.reference)}</div>` : ""}</td></tr>`).join("") || `<tr><td colspan="4" class="muted">Aucune remuneration pour l'instant</td></tr>`}
+        ${w.payments.map((p) => `<tr><td>${dt(p.created_at)}</td><td>${p.kind === "CONVERSION_POINTS" ? `Conversion de ${num(p.points_converted)} pts` : `Declaration n°${p.declaration_id}`}</td><td class="num">${fcfa(p.amount_fcfa)}</td><td>${badge(p.status)}${p.reference ? `<div class="small muted">${esc(p.reference)}</div>` : ""}</td></tr>`).join("") || `<tr><td colspan="4" class="muted">Aucune remuneration pour l'instant</td></tr>`}
       </table></div></div>
       <div class="card"><h2>Historique des points</h2>
-        ${w.points_history.map((t) => `<div class="list-item"><strong>+${t.points}</strong> ${esc(t.reason)} <span class="small muted">${dt(t.created_at)}</span></div>`).join("") || "<p class='muted'>Pas encore de points</p>"}
+        ${w.points_history.map((t) => `<div class="list-item"><strong>${t.points > 0 ? "+" : ""}${t.points}</strong> ${esc(t.reason)} <span class="small muted">${dt(t.created_at)}</span></div>`).join("") || "<p class='muted'>Pas encore de points</p>"}
       </div>
     </div>`;
+  const go = $("#cv-go");
+  if (go) go.onclick = () => withBusy(go, async () => {
+    const p = await api("/api/wallet/convert", { method: "POST", body: { points: +$("#cv-pts").value } });
+    toast(`${num(p.points_converted)} points convertis : ${fcfa(p.amount_fcfa)} en attente de versement`);
+    state.user = await api("/api/me");
+    router();
+  });
 };
 
 VIEWS.historique = async () => {
@@ -533,6 +559,45 @@ VIEWS.dashboard = async () => {
   const map = makeMap("dash-map", ABIDJAN, 11);
   open.forEach((r) => L.circleMarker([r.latitude, r.longitude], dot(r.status === "SIGNALE" ? cssVar("--accent") : cssVar("--info"))).addTo(map)
     .bindPopup(`n°${r.id} ${badge(r.status)}<br>~${kg(r.ai_estimated_weight_kg)}`));
+};
+
+VIEWS.pilote = async () => {
+  const p = await api("/api/admin/pilot");
+  const t = p.totaux, r = p.regles;
+  view.innerHTML = `<h1>Projet pilote — ${p.communes.length} communes</h1>
+    <p class="muted">Simulation sur ${p.duree_mois} mois : ${num(t.menages)} menages, ${num(t.commercants)} commercants et ${num(t.citoyens)} citoyens.</p>
+    <div class="kpis">
+      <div class="kpi"><div class="label">Menages</div><div class="value">${num(t.menages)}</div></div>
+      <div class="kpi"><div class="label">Commercants</div><div class="value">${num(t.commercants)}</div></div>
+      <div class="kpi"><div class="label">Recycle (valide)</div><div class="value">${kg(t.kg_valides)}</div></div>
+      <div class="kpi"><div class="label">Remunerations</div><div class="value">${fcfa(t.fcfa_remuneres)}</div></div>
+      <div class="kpi"><div class="label">Revenu moyen / mois</div><div class="value">${fcfa(p.revenu_mensuel_moyen_fcfa.menage_actif)}</div><div class="hint">menage actif · ${fcfa(p.revenu_mensuel_moyen_fcfa.commercant_actif)} commercant actif</div></div>
+      <div class="kpi"><div class="label">Points attribues</div><div class="value">${num(t.points_attribues)}</div></div>
+    </div>
+    <div class="card table-wrap"><h2>Resultats par commune</h2><table>
+      <tr><th>Commune</th><th class="num">Menages</th><th class="num">Commercants</th><th class="num">Citoyens</th><th class="num">Declarations</th>
+        <th class="num">kg valides</th><th class="num">FCFA</th><th class="num">Points</th><th class="num">Point relais</th><th class="num">Signalements</th></tr>
+      ${p.communes.map((c) => `<tr><td><strong>${esc(c.commune)}</strong></td><td class="num">${num(c.menages)}</td><td class="num">${num(c.commercants)}</td>
+        <td class="num">${num(c.citoyens)}</td><td class="num">${num(c.declarations)}</td><td class="num">${num(c.kg_valides)}</td>
+        <td class="num">${num(c.fcfa_remuneres)}</td><td class="num">${num(c.points_attribues)}</td><td class="num">${c.part_point_relais_pct} %</td>
+        <td class="num">${num(c.signalements)}</td></tr>`).join("")}
+      <tr><th>Total</th><th class="num">${num(t.menages)}</th><th class="num">${num(t.commercants)}</th><th class="num">${num(t.citoyens)}</th>
+        <th class="num">${num(t.declarations)}</th><th class="num">${num(t.kg_valides)}</th><th class="num">${num(t.fcfa_remuneres)}</th>
+        <th class="num">${num(t.points_attribues)}</th><th></th><th class="num">${num(t.signalements)}</th></tr>
+    </table></div>
+    <div class="grid grid-2">
+      <div class="card"><h2>Bareme de remuneration</h2>
+        ${Object.entries(r.bareme.tarifs_fcfa_kg).map(([m, v]) => `<div class="mat-row"><span>${esc(m)}</span><span></span><strong>${v} F/kg</strong></div>`).join("")}
+        <p class="small muted">${esc(r.bareme.justification)}</p></div>
+      <div class="card"><h2>Seuil Y = ${r.seuil_y.valeur_kg} kg</h2>
+        <p>Cout d'un arret a domicile : <strong>${fcfa(r.seuil_y.cout_arret_domicile_fcfa)}</strong> · au seuil : <strong>${r.seuil_y.cout_logistique_par_kg_au_seuil} F/kg</strong> (${r.seuil_y.part_du_prix_moyen_pct} % du prix moyen)</p>
+        <p class="small muted">${esc(r.seuil_y.justification)}</p></div>
+      <div class="card"><h2>Points et conversion</h2>
+        <p>${r.points.points_par_kg} pts/kg + ${r.points.bonus_par_depot} pts par depot en point relais · ${r.points.points_signalement} pts par signalement confirme</p>
+        <p><strong>1 point = ${r.points.valeur_point_fcfa} FCFA</strong>, convertible des ${num(r.points.minimum_conversion)} points</p>
+        <p class="small muted">${esc(r.points.justification)}</p></div>
+    </div>
+    <p class="small muted">Ces valeurs se modifient dans « Tarifs & parametres » ; les justifications se recalculent automatiquement.</p>`;
 };
 
 VIEWS.signalements = async () => {
@@ -709,7 +774,7 @@ VIEWS.paiements = async () => {
   view.innerHTML = `<h1>Paiements en attente</h1>
     <p class="muted">Total : <strong>${fcfa(rows.reduce((s, p) => s + p.amount_fcfa, 0))}</strong> pour ${rows.length} usagers.</p>
     <div class="card table-wrap"><table><tr><th>Date</th><th>Usager</th><th>Declaration</th><th class="num">Montant</th><th></th></tr>
-      ${rows.map((p) => `<tr><td>${dt(p.created_at)}</td><td>${esc(p.user)}</td><td>n°${p.declaration_id}</td><td class="num">${fcfa(p.amount_fcfa)}</td>
+      ${rows.map((p) => `<tr><td>${dt(p.created_at)}</td><td>${esc(p.user)}</td><td>${p.kind === "CONVERSION_POINTS" ? `Conversion ${num(p.points_converted)} pts` : `n°${p.declaration_id}`}</td><td class="num">${fcfa(p.amount_fcfa)}</td>
         <td>${admin ? `<button class="btn sm" data-pay="${p.id}">Marquer paye</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="5" class="muted">Rien a payer</td></tr>`}
     </table></div>`;
   $$("[data-pay]").forEach((b) => (b.onclick = async () => {
@@ -761,8 +826,10 @@ VIEWS.tarifs = async () => {
 VIEWS.snowflake = async () => {
   const cfg = await api("/api/admin/snowflake/config");
   const v = (x) => esc(x ?? "");
-  const browserMode = cfg.authenticator !== "snowflake";
+  const mode = cfg.authenticator || "keypair";
   view.innerHTML = `<h1>Snowflake & IA</h1>
+    ${cfg.configured ? "" : `<div class="card notice">Pas encore de compte ? Cree un compte gratuit (120 jours) via le lien partenaire du hackathon :
+      <a href="https://mlh.link/snowflake-signup" target="_blank" rel="noopener">mlh.link/snowflake-signup</a>. L'activation peut prendre quelques minutes.</div>`}
     <div class="grid grid-2">
       <form class="card" id="f-sf" autocomplete="off">
         <h2>Connexion a mon compte Snowflake ${cfg.configured ? badge("OK") : `<span class="badge REJETE">non connecte</span>`}</h2>
@@ -772,11 +839,23 @@ VIEWS.snowflake = async () => {
         <label for="sf-user">Nom d'utilisateur Snowflake</label>
         <input id="sf-user" name="user" value="${v(cfg.user)}" required>
         <label>Mode de connexion</label>
-        <label class="small" style="font-weight:400"><input type="radio" name="authenticator" value="externalbrowser" ${browserMode ? "checked" : ""} style="width:auto">
-          Via mon navigateur (recommande) : la page de connexion Snowflake s'ouvre, aucun mot de passe n'est enregistre</label>
-        <label class="small" style="font-weight:400"><input type="radio" name="authenticator" value="snowflake" ${browserMode ? "" : "checked"} style="width:auto">
-          Mot de passe (enregistre dans le fichier .env de ce PC)</label>
-        <div id="sf-pwd-box" ${browserMode ? "hidden" : ""}>
+        <label class="small" style="font-weight:400"><input type="radio" name="authenticator" value="keypair" ${mode === "keypair" ? "checked" : ""} style="width:auto">
+          <strong>Cle securisee (recommande)</strong> : aucun mot de passe, compatible avec la double authentification des comptes d'essai</label>
+        <label class="small" style="font-weight:400"><input type="radio" name="authenticator" value="externalbrowser" ${mode === "externalbrowser" ? "checked" : ""} style="width:auto">
+          SSO d'entreprise via le navigateur (uniquement si ton organisation a configure le SSO)</label>
+        <label class="small" style="font-weight:400"><input type="radio" name="authenticator" value="snowflake" ${mode === "snowflake" ? "checked" : ""} style="width:auto">
+          Mot de passe (refuse si la double authentification est active sur ton compte)</label>
+        <div id="sf-key-box" ${mode === "keypair" ? "" : "hidden"} class="notice" style="margin-top:8px">
+          <strong>Etape 1</strong> : remplis ton nom d'utilisateur ci-dessus puis clique sur <button type="button" class="btn sm" id="sf-genkey">Generer ma cle</button>
+          <div id="sf-key-out" hidden>
+            <p class="small"><strong>Etape 2</strong> : dans Snowsight, ouvre une feuille SQL (Projects → Worksheets → +), colle cette commande et execute-la :</p>
+            <textarea id="sf-sql" readonly rows="4" style="font-family:monospace;font-size:.75rem"></textarea>
+            <button type="button" class="btn ghost sm" id="sf-copy">Copier la commande</button>
+            <p class="small"><strong>Etape 3</strong> : reviens ici et clique sur « Enregistrer et me connecter ».</p>
+          </div>
+          <p class="small muted" style="margin-top:6px">La cle privee reste sur ce PC (dossier data, jamais envoye sur GitHub).</p>
+        </div>
+        <div id="sf-pwd-box" ${mode === "snowflake" ? "" : "hidden"}>
           <label for="sf-pwd">Mot de passe Snowflake</label>
           <input id="sf-pwd" name="password" type="password" autocomplete="new-password" placeholder="${cfg.has_password ? "inchange si vide" : ""}">
         </div>
@@ -791,16 +870,37 @@ VIEWS.snowflake = async () => {
         <label class="small" style="font-weight:400"><input type="checkbox" name="use_cortex_for_photos" ${cfg.ai_provider === "snowflake" ? "checked" : ""} style="width:auto">
           Analyser les photos avec Snowflake Cortex AI (sinon estimation locale)</label>
         <div class="actions"><button class="btn" id="sf-save">Enregistrer et me connecter</button></div>
-        <p class="small muted">En mode navigateur, une fenetre Snowflake s'ouvre a la premiere connexion : connecte-toi puis reviens ici.</p>
+        <p class="small muted">Astuce : avec un compte d'essai, le role ACCOUNTADMIN et l'entrepot COMPUTE_WH existent deja.</p>
       </form>
-      <div class="card"><h2>Diagnostic et synchronisation</h2>
-        <div class="actions"><button class="btn ghost" id="diag" ${cfg.configured ? "" : "disabled"}>Lancer le diagnostic</button>
-          <button class="btn ghost" id="sync" ${cfg.configured ? "" : "disabled"}>Synchroniser les donnees</button></div>
+      <div class="card"><h2>Diagnostic, installation et synchronisation</h2>
+        <ol class="small">
+          <li><strong>Diagnostic</strong> : verifie la connexion, la region et l'acces a Cortex AI.</li>
+          <li><strong>Installer EcoAbidjan dans Snowflake</strong> : cree la base, les tables, les vues et genere la simulation (GENERATOR, GEOGRAPHY).</li>
+          <li><strong>Synchroniser</strong> : copie les donnees de l'application vers Snowflake.</li>
+        </ol>
+        <div class="actions"><button class="btn ghost" id="diag" ${cfg.configured ? "" : "disabled"}>1. Diagnostic</button>
+          <button class="btn ghost" id="setup" ${cfg.configured ? "" : "disabled"}>2. Installer dans Snowflake</button>
+          <button class="btn ghost" id="sync" ${cfg.configured ? "" : "disabled"}>3. Synchroniser</button></div>
         <div id="sf-out" class="small muted" style="margin-top:12px">${cfg.configured ? "—" : "Connecte d'abord ton compte."}</div>
-        <p class="notice" style="margin-top:12px">Avant la synchronisation, execute dans Snowsight les scripts <code>snowflake/01_setup.sql</code> et <code>02_tables.sql</code> du projet.</p>
       </div>
     </div>`;
-  $$("input[name=authenticator]").forEach((r) => (r.onchange = () => { $("#sf-pwd-box").hidden = r.value !== "snowflake" || !r.checked; }));
+  $$("input[name=authenticator]").forEach((r) => (r.onchange = () => {
+    $("#sf-pwd-box").hidden = r.value !== "snowflake";
+    $("#sf-key-box").hidden = r.value !== "keypair";
+  }));
+  $("#sf-genkey").onclick = (e) => {
+    const user = $("#sf-user").value.trim();
+    if (!user) return toast("Indique d'abord ton nom d'utilisateur Snowflake", true);
+    withBusy(e.target, async () => {
+      const k = await api(`/api/admin/snowflake/keypair?user=${encodeURIComponent(user)}`, { method: "POST" });
+      $("#sf-sql").value = k.sql;
+      $("#sf-key-out").hidden = false;
+    });
+  };
+  $("#sf-copy").onclick = async () => {
+    try { await navigator.clipboard.writeText($("#sf-sql").value); toast("Commande copiee"); }
+    catch { $("#sf-sql").select(); toast("Selectionne et copie la commande (Ctrl+C)"); }
+  };
   const runDiag = async () => {
     $("#sf-out").textContent = "Connexion a Snowflake… (une fenetre de connexion peut s'ouvrir)";
     const checks = await api("/api/admin/snowflake/diagnostics");
@@ -815,12 +915,24 @@ VIEWS.snowflake = async () => {
     withBusy($("#sf-save"), async () => {
       await api("/api/admin/snowflake/config", { method: "PUT", body });
       $("#sf-pwd").value = "";
-      $("#diag").disabled = false; $("#sync").disabled = false;
+      $("#diag").disabled = false; $("#sync").disabled = false; $("#setup").disabled = false;
       toast("Configuration enregistree");
       await runDiag();
     });
   };
   $("#diag").onclick = (e) => withBusy(e.target, runDiag);
+  $("#setup").onclick = (e) => withBusy(e.target, async () => {
+    $("#sf-out").textContent = "Installation en cours dans Snowflake (environ 1 minute)…";
+    const r = await api("/api/admin/snowflake/setup", { method: "POST" });
+    const s = r.synthese;
+    $("#sf-out").innerHTML = `<p>Role utilise : <strong>${esc(r.role)}</strong></p>
+      <table>${r.scripts.map((x) => `<tr><td>${x.erreurs.length ? "⚠️" : "✅"}</td><td><strong>${esc(x.script)}</strong> : ${x.ok} instructions
+        ${x.erreurs.length ? `<div class="muted">${x.erreurs.slice(0, 4).map(esc).join("<br>")}</div>` : ""}</td></tr>`).join("")}</table>
+      <h3 style="margin-top:10px">Simulation generee dans Snowflake (schema SIM)</h3>
+      <p>${r.controles.map((c) => `${esc(c.controle)} : <strong>${num(c.valeur)}</strong>`).join(" · ")}</p>
+      ${s.length ? `<div class="table-wrap"><table><tr><th>Commune</th><th class="num">Menages</th><th class="num">Commercants</th><th class="num">kg valides</th><th class="num">FCFA</th><th class="num">Relais</th></tr>
+        ${s.map((c) => `<tr><td>${esc(c.COMMUNE)}</td><td class="num">${num(c.MENAGES)}</td><td class="num">${num(c.COMMERCANTS)}</td><td class="num">${num(c.KG_VALIDES)}</td><td class="num">${num(c.REMUNERATION_FCFA)}</td><td class="num">${c.PART_POINT_RELAIS_PCT} %</td></tr>`).join("")}</table></div>` : ""}`;
+  });
   $("#sync").onclick = (e) => withBusy(e.target, async () => {
     const r = await api("/api/admin/snowflake/sync", { method: "POST" });
     $("#sf-out").innerHTML = `<p>Synchronisation terminee.</p><table>${Object.entries(r.tables).map(([t, n]) => `<tr><td>${esc(t)}</td><td class="num">${num(n)} lignes</td></tr>`).join("")}</table>`;
