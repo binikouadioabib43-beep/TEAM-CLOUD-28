@@ -1,12 +1,11 @@
 """Espace agents et administrateurs : validation, tarifs, collectes, tableau de bord, Snowflake."""
-import re
 from collections import defaultdict
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from ..config import save_env, settings
+from ..config import settings
 from ..database import get_db
 from ..models import (
     Collection, CollectionCost, CollectionStop, Commune, Declaration, DeclarationItem, Material,
@@ -14,7 +13,7 @@ from ..models import (
 )
 from ..schemas import (
     CollectionCostIn, CollectionPlanIn, MaterialIn, ParameterIn, PaymentUpdateIn, RejectIn,
-    RelayPointIn, ReportStatusIn, SnowflakeConfigIn, StopUpdateIn, TariffIn, ValidationIn,
+    RelayPointIn, ReportStatusIn, StopUpdateIn, TariffIn, ValidationIn,
 )
 from ..security import require_roles
 from ..serializers import (
@@ -495,100 +494,20 @@ def pilot(_: User = Depends(staff), db: Session = Depends(get_db)):
     }
 
 
-# --- Snowflake -----------------------------------------------------------------------
 
-def _snowflake_public_config() -> dict:
+# --- Snowflake (lecture seule) ---------------------------------------------------------
+# La connexion se configure cote serveur (.env + python -m backend.app.snowflake_cli),
+# jamais depuis l'interface.
+
+@router.get("/snowflake/status")
+def snowflake_status(_: User = Depends(staff)):
+    from ..services.snowflake_client import last_sync
     sf = settings.snowflake
     return {
-        "account": sf["account"], "user": sf["user"], "role": sf["role"],
-        "warehouse": sf["warehouse"], "database": sf["database"], "schema": sf["schema"],
-        "authenticator": "keypair" if sf["private_key_file"] else (
-            sf["authenticator"] or ("snowflake" if sf["password"] else None)),
-        "key_generated": KEY_FILE.exists(),
-        "has_password": bool(sf["password"]), "configured": settings.snowflake_configured,
-        "ai_provider": settings.ai_provider,
+        "configured": settings.snowflake_configured,
+        "account": sf["account"], "database": sf["database"], "role": sf["role"],
+        "ai_provider_photos": settings.ai_provider,
+        "assistant": "snowflake-cortex" if settings.snowflake_configured and settings.assistant_provider != "local" else "local",
+        "sync_minutes": settings.snowflake_sync_minutes,
+        "last_sync": last_sync,
     }
-
-
-KEY_FILE = settings.data_dir / "snowflake_rsa_key.p8"
-
-
-@router.post("/snowflake/keypair")
-def generate_keypair(user: str | None = None, _: User = Depends(admin_only)):
-    """Genere une paire de cles RSA : la cle privee reste sur ce PC (dossier data, ignore par Git),
-    la cle publique est a enregistrer dans Snowflake avec ALTER USER."""
-    from cryptography.hazmat.primitives import serialization
-    from cryptography.hazmat.primitives.asymmetric import rsa
-
-    if not KEY_FILE.exists():
-        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-        KEY_FILE.write_bytes(key.private_bytes(
-            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
-    key = serialization.load_pem_private_key(KEY_FILE.read_bytes(), password=None)
-    pem = key.public_key().public_bytes(serialization.Encoding.PEM,
-                                        serialization.PublicFormat.SubjectPublicKeyInfo).decode()
-    body = "".join(l for l in pem.splitlines() if "PUBLIC KEY" not in l)
-    target = (user or settings.snowflake["user"] or "<TON_UTILISATEUR>").strip()
-    if not re.fullmatch(r"[A-Za-z0-9_.@\-<>]+", target):
-        raise HTTPException(400, "Nom d'utilisateur invalide")
-    return {"public_key": body, "sql": f"ALTER USER \"{target.upper()}\" SET RSA_PUBLIC_KEY='{body}';"}
-
-
-@router.get("/snowflake/config")
-def get_snowflake_config(_: User = Depends(admin_only)):
-    return _snowflake_public_config()
-
-
-@router.put("/snowflake/config")
-def set_snowflake_config(data: SnowflakeConfigIn, _: User = Depends(admin_only)):
-    from ..services.snowflake_client import reset_connection
-    values = data.model_dump(by_alias=True, exclude={"password", "use_cortex_for_photos"})
-    values["account"] = values["account"].strip()
-    values["user"] = values["user"].strip()
-    values["private_key_file"] = None
-    if data.authenticator == "keypair":
-        if not KEY_FILE.exists():
-            raise HTTPException(400, "Genere d'abord la cle (bouton « Generer ma cle »)")
-        values["authenticator"] = None
-        values["password"] = None
-        values["private_key_file"] = str(KEY_FILE)
-    elif data.authenticator == "externalbrowser":
-        values["password"] = None  # jamais de mot de passe stocke en mode navigateur
-    elif data.password:
-        values["password"] = data.password
-    elif not settings.snowflake["password"]:
-        raise HTTPException(400, "Mot de passe requis pour ce mode de connexion")
-    settings.update_snowflake(values)
-    reset_connection()
-    provider = "snowflake" if data.use_cortex_for_photos else "local"
-    settings.ai_provider = provider
-    save_env({"AI_PROVIDER": provider})
-    return _snowflake_public_config()
-
-
-@router.get("/snowflake/diagnostics")
-def snowflake_diagnostics(_: User = Depends(admin_only)):
-    from ..services.snowflake_client import run_diagnostics
-    return run_diagnostics()
-
-
-@router.post("/snowflake/setup")
-def snowflake_setup(_: User = Depends(admin_only)):
-    from ..services.snowflake_client import SnowflakeNotConfigured, run_setup_scripts
-    try:
-        return run_setup_scripts()
-    except SnowflakeNotConfigured as exc:
-        raise HTTPException(400, str(exc))
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(502, f"Erreur Snowflake : {exc}")
-
-
-@router.post("/snowflake/sync")
-def snowflake_sync(_: User = Depends(admin_only), db: Session = Depends(get_db)):
-    from ..services.snowflake_client import SnowflakeNotConfigured, sync_to_snowflake
-    try:
-        return {"ok": True, "tables": sync_to_snowflake(db)}
-    except SnowflakeNotConfigured as exc:
-        raise HTTPException(400, str(exc))
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(502, f"Erreur Snowflake : {exc}")

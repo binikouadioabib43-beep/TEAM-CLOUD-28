@@ -130,13 +130,13 @@ const USER_ROUTES = [
 ];
 const STAFF_ROUTES = [
   ["dashboard", "Tableau de bord"], ["pilote", "Projet pilote"], ["signalements", "Signalements"], ["validations", "Declarations"],
-  ["tournees", "Tournees"], ["paiements", "Paiements"], ["tarifs", "Tarifs & parametres"], ["snowflake", "Snowflake"],
+  ["tournees", "Tournees"], ["paiements", "Paiements"], ["tarifs", "Tarifs & parametres"],
 ];
 
 function routes() {
   if (!state.user) return [];
   if (state.user.role === "admin") return STAFF_ROUTES;
-  if (state.user.role === "agent") return STAFF_ROUTES.filter((r) => !["tarifs", "snowflake"].includes(r[0]));
+  if (state.user.role === "agent") return STAFF_ROUTES.filter((r) => r[0] !== "tarifs");
   return USER_ROUTES;
 }
 
@@ -821,122 +821,6 @@ VIEWS.tarifs = async () => {
     ]);
     if (v) withBusy(null, async () => { await api("/api/admin/materials", { method: "POST", body: { code: v.code.toUpperCase(), name: v.name, price_fcfa_per_kg: +v.price } }); toast("Matiere ajoutee"); router(); });
   };
-};
-
-VIEWS.snowflake = async () => {
-  const cfg = await api("/api/admin/snowflake/config");
-  const v = (x) => esc(x ?? "");
-  const mode = cfg.authenticator || "keypair";
-  view.innerHTML = `<h1>Snowflake & IA</h1>
-    ${cfg.configured ? "" : `<div class="card notice">Pas encore de compte ? Cree un compte gratuit (120 jours) via le lien partenaire du hackathon :
-      <a href="https://mlh.link/snowflake-signup" target="_blank" rel="noopener">mlh.link/snowflake-signup</a>. L'activation peut prendre quelques minutes.</div>`}
-    <div class="grid grid-2">
-      <form class="card" id="f-sf" autocomplete="off">
-        <h2>Connexion a mon compte Snowflake ${cfg.configured ? badge("OK") : `<span class="badge REJETE">non connecte</span>`}</h2>
-        <label for="sf-account">Identifiant du compte</label>
-        <input id="sf-account" name="account" value="${v(cfg.account)}" placeholder="monorg-moncompte" required>
-        <p class="small muted">Dans Snowsight : clique sur ton nom en bas a gauche → ton compte → « View account details ». Copie « Account identifier » (format <code>orgname-accountname</code>).</p>
-        <label for="sf-user">Nom d'utilisateur Snowflake</label>
-        <input id="sf-user" name="user" value="${v(cfg.user)}" required>
-        <label>Mode de connexion</label>
-        <label class="small" style="font-weight:400"><input type="radio" name="authenticator" value="keypair" ${mode === "keypair" ? "checked" : ""} style="width:auto">
-          <strong>Cle securisee (recommande)</strong> : aucun mot de passe, compatible avec la double authentification des comptes d'essai</label>
-        <label class="small" style="font-weight:400"><input type="radio" name="authenticator" value="externalbrowser" ${mode === "externalbrowser" ? "checked" : ""} style="width:auto">
-          SSO d'entreprise via le navigateur (uniquement si ton organisation a configure le SSO)</label>
-        <label class="small" style="font-weight:400"><input type="radio" name="authenticator" value="snowflake" ${mode === "snowflake" ? "checked" : ""} style="width:auto">
-          Mot de passe (refuse si la double authentification est active sur ton compte)</label>
-        <div id="sf-key-box" ${mode === "keypair" ? "" : "hidden"} class="notice" style="margin-top:8px">
-          <strong>Etape 1</strong> : remplis ton nom d'utilisateur ci-dessus puis clique sur <button type="button" class="btn sm" id="sf-genkey">Generer ma cle</button>
-          <div id="sf-key-out" hidden>
-            <p class="small"><strong>Etape 2</strong> : dans Snowsight, ouvre une feuille SQL (Projects → Worksheets → +), colle cette commande et execute-la :</p>
-            <textarea id="sf-sql" readonly rows="4" style="font-family:monospace;font-size:.75rem"></textarea>
-            <button type="button" class="btn ghost sm" id="sf-copy">Copier la commande</button>
-            <p class="small"><strong>Etape 3</strong> : reviens ici et clique sur « Enregistrer et me connecter ».</p>
-          </div>
-          <p class="small muted" style="margin-top:6px">La cle privee reste sur ce PC (dossier data, jamais envoye sur GitHub).</p>
-        </div>
-        <div id="sf-pwd-box" ${mode === "snowflake" ? "" : "hidden"}>
-          <label for="sf-pwd">Mot de passe Snowflake</label>
-          <input id="sf-pwd" name="password" type="password" autocomplete="new-password" placeholder="${cfg.has_password ? "inchange si vide" : ""}">
-        </div>
-        <div class="row">
-          <div><label for="sf-role">Role</label><input id="sf-role" name="role" value="${v(cfg.role)}" placeholder="ex. ACCOUNTADMIN ou ECOABIDJAN_APP"></div>
-          <div><label for="sf-wh">Entrepot (warehouse)</label><input id="sf-wh" name="warehouse" value="${v(cfg.warehouse)}" placeholder="ex. COMPUTE_WH"></div>
-        </div>
-        <div class="row">
-          <div><label for="sf-db">Base</label><input id="sf-db" name="database" value="${v(cfg.database ?? "ECOABIDJAN")}"></div>
-          <div><label for="sf-sc">Schema</label><input id="sf-sc" name="schema" value="${v(cfg.schema ?? "CORE")}"></div>
-        </div>
-        <label class="small" style="font-weight:400"><input type="checkbox" name="use_cortex_for_photos" ${cfg.ai_provider === "snowflake" ? "checked" : ""} style="width:auto">
-          Analyser les photos avec Snowflake Cortex AI (sinon estimation locale)</label>
-        <div class="actions"><button class="btn" id="sf-save">Enregistrer et me connecter</button></div>
-        <p class="small muted">Astuce : avec un compte d'essai, le role ACCOUNTADMIN et l'entrepot COMPUTE_WH existent deja.</p>
-      </form>
-      <div class="card"><h2>Diagnostic, installation et synchronisation</h2>
-        <ol class="small">
-          <li><strong>Diagnostic</strong> : verifie la connexion, la region et l'acces a Cortex AI.</li>
-          <li><strong>Installer EcoAbidjan dans Snowflake</strong> : cree la base, les tables, les vues et genere la simulation (GENERATOR, GEOGRAPHY).</li>
-          <li><strong>Synchroniser</strong> : copie les donnees de l'application vers Snowflake.</li>
-        </ol>
-        <div class="actions"><button class="btn ghost" id="diag" ${cfg.configured ? "" : "disabled"}>1. Diagnostic</button>
-          <button class="btn ghost" id="setup" ${cfg.configured ? "" : "disabled"}>2. Installer dans Snowflake</button>
-          <button class="btn ghost" id="sync" ${cfg.configured ? "" : "disabled"}>3. Synchroniser</button></div>
-        <div id="sf-out" class="small muted" style="margin-top:12px">${cfg.configured ? "—" : "Connecte d'abord ton compte."}</div>
-      </div>
-    </div>`;
-  $$("input[name=authenticator]").forEach((r) => (r.onchange = () => {
-    $("#sf-pwd-box").hidden = r.value !== "snowflake";
-    $("#sf-key-box").hidden = r.value !== "keypair";
-  }));
-  $("#sf-genkey").onclick = (e) => {
-    const user = $("#sf-user").value.trim();
-    if (!user) return toast("Indique d'abord ton nom d'utilisateur Snowflake", true);
-    withBusy(e.target, async () => {
-      const k = await api(`/api/admin/snowflake/keypair?user=${encodeURIComponent(user)}`, { method: "POST" });
-      $("#sf-sql").value = k.sql;
-      $("#sf-key-out").hidden = false;
-    });
-  };
-  $("#sf-copy").onclick = async () => {
-    try { await navigator.clipboard.writeText($("#sf-sql").value); toast("Commande copiee"); }
-    catch { $("#sf-sql").select(); toast("Selectionne et copie la commande (Ctrl+C)"); }
-  };
-  const runDiag = async () => {
-    $("#sf-out").textContent = "Connexion a Snowflake… (une fenetre de connexion peut s'ouvrir)";
-    const checks = await api("/api/admin/snowflake/diagnostics");
-    $("#sf-out").innerHTML = `<table>${checks.map((c) => `<tr><td>${c.ok ? "✅" : "❌"}</td><td><strong>${esc(c.check)}</strong><div class="muted">${esc(c.detail)}</div></td></tr>`).join("")}</table>`;
-  };
-  $("#f-sf").onsubmit = (e) => {
-    e.preventDefault();
-    const f = new FormData(e.target);
-    const body = Object.fromEntries(f);
-    body.use_cortex_for_photos = f.has("use_cortex_for_photos");
-    for (const k of ["password", "role", "warehouse", "database", "schema"]) if (!body[k]) body[k] = null;
-    withBusy($("#sf-save"), async () => {
-      await api("/api/admin/snowflake/config", { method: "PUT", body });
-      $("#sf-pwd").value = "";
-      $("#diag").disabled = false; $("#sync").disabled = false; $("#setup").disabled = false;
-      toast("Configuration enregistree");
-      await runDiag();
-    });
-  };
-  $("#diag").onclick = (e) => withBusy(e.target, runDiag);
-  $("#setup").onclick = (e) => withBusy(e.target, async () => {
-    $("#sf-out").textContent = "Installation en cours dans Snowflake (environ 1 minute)…";
-    const r = await api("/api/admin/snowflake/setup", { method: "POST" });
-    const s = r.synthese;
-    $("#sf-out").innerHTML = `<p>Role utilise : <strong>${esc(r.role)}</strong></p>
-      <table>${r.scripts.map((x) => `<tr><td>${x.erreurs.length ? "⚠️" : "✅"}</td><td><strong>${esc(x.script)}</strong> : ${x.ok} instructions
-        ${x.erreurs.length ? `<div class="muted">${x.erreurs.slice(0, 4).map(esc).join("<br>")}</div>` : ""}</td></tr>`).join("")}</table>
-      <h3 style="margin-top:10px">Simulation generee dans Snowflake (schema SIM)</h3>
-      <p>${r.controles.map((c) => `${esc(c.controle)} : <strong>${num(c.valeur)}</strong>`).join(" · ")}</p>
-      ${s.length ? `<div class="table-wrap"><table><tr><th>Commune</th><th class="num">Menages</th><th class="num">Commercants</th><th class="num">kg valides</th><th class="num">FCFA</th><th class="num">Relais</th></tr>
-        ${s.map((c) => `<tr><td>${esc(c.COMMUNE)}</td><td class="num">${num(c.MENAGES)}</td><td class="num">${num(c.COMMERCANTS)}</td><td class="num">${num(c.KG_VALIDES)}</td><td class="num">${num(c.REMUNERATION_FCFA)}</td><td class="num">${c.PART_POINT_RELAIS_PCT} %</td></tr>`).join("")}</table></div>` : ""}`;
-  });
-  $("#sync").onclick = (e) => withBusy(e.target, async () => {
-    const r = await api("/api/admin/snowflake/sync", { method: "POST" });
-    $("#sf-out").innerHTML = `<p>Synchronisation terminee.</p><table>${Object.entries(r.tables).map(([t, n]) => `<tr><td>${esc(t)}</td><td class="num">${num(n)} lignes</td></tr>`).join("")}</table>`;
-  });
 };
 
 // --- Assistant Eco ---------------------------------------------------------------

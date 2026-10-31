@@ -47,6 +47,8 @@ class Settings:
         # Assistant : auto = Cortex si Snowflake est connecte, sinon moteur local
         self.assistant_provider = os.getenv("ASSISTANT_PROVIDER", "auto").lower()
         self.cortex_chat_model = os.getenv("CORTEX_CHAT_MODEL", "claude-3-5-sonnet")
+        # Synchronisation automatique vers Snowflake (minutes ; 0 = desactivee)
+        self.snowflake_sync_minutes = int(os.getenv("SNOWFLAKE_SYNC_MINUTES", "30"))
 
         self.snowflake = {
             key: os.getenv(f"SNOWFLAKE_{key.upper()}") or None

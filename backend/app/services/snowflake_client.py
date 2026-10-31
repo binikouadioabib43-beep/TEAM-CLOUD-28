@@ -14,7 +14,24 @@ class SnowflakeNotConfigured(RuntimeError):
     pass
 
 
+KEY_FILE = settings.data_dir / "snowflake_rsa_key.p8"
 _shared_conn = None
+last_sync: dict = {"at": None, "ok": None, "detail": None}
+
+
+def ensure_keypair() -> str:
+    """Cree (une seule fois) la cle privee RSA dans data/ et renvoie la cle publique a declarer dans Snowflake."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    if not KEY_FILE.exists():
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        KEY_FILE.write_bytes(key.private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+    key = serialization.load_pem_private_key(KEY_FILE.read_bytes(), password=None)
+    pem = key.public_key().public_bytes(serialization.Encoding.PEM,
+                                        serialization.PublicFormat.SubjectPublicKeyInfo).decode()
+    return "".join(l for l in pem.splitlines() if "PUBLIC KEY" not in l)
 
 
 class _SharedConnection:
@@ -205,9 +222,12 @@ def sync_to_snowflake(db: Session) -> dict:
                 )
             summary[table] = len(rows)
         cur.execute("COMMIT")
-    except Exception:
+    except Exception as exc:
         conn.cursor().execute("ROLLBACK")
+        last_sync.update(at=datetime.now().isoformat(timespec="seconds"), ok=False, detail=str(exc)[:300])
         raise
     finally:
         conn.close()
+    last_sync.update(at=datetime.now().isoformat(timespec="seconds"), ok=True,
+                     detail=f"{sum(summary.values())} lignes")
     return summary

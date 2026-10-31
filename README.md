@@ -85,17 +85,32 @@ Un assistant de chat est disponible sur toutes les pages (bouton 💬), pour les
 
 ## Snowflake
 
-1. Dans Snowsight, exécuter dans l'ordre les scripts du dossier [`snowflake/`](snowflake/) :
-   - `00_diagnostic.sql` : vérifie la région, l'accès à Cortex et les modèles disponibles. **À faire en premier.**
-   - `01_setup.sql` : entrepôt, base `ECOABIDJAN`, schémas `RAW`/`CORE`/`ANALYTICS`, rôle `ECOABIDJAN_APP`, stage des photos.
-   - `02_tables.sql` : tables du schéma `CORE`.
-   - `03_reference_data.sql` : matières et tarifs initiaux (facultatif).
-   - `04_analytics_views.sql` : vues du tableau de bord.
-   - `05_cortex_image_analysis.sql` : analyse des photos en lot avec Cortex.
-2. Installer le connecteur : `pip install -r requirements-optional.txt`
-3. Copier `.env.example` en `.env` et renseigner `SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_USER`, `SNOWFLAKE_PASSWORD` (ou une clé RSA).
-4. Dans l'application (admin → Snowflake) : **Lancer le diagnostic**, puis **Synchroniser les données**.
-5. Pour analyser les photos avec Cortex : `AI_PROVIDER=snowflake` dans `.env`. En cas d'erreur Cortex, l'application bascule sur l'estimation locale et note l'erreur.
+Snowflake est intégré **côté serveur uniquement** : rien ne se configure dans l'interface.
+Connexion par **paire de clés RSA** (pas de mot de passe, compatible avec la double authentification des comptes d'essai).
+
+```powershell
+pip install -r requirements-optional.txt
+# 1. Configurer la connexion (cree la cle dans data/, ecrit .env, affiche la commande ALTER USER)
+python -m backend.app.snowflake_cli init --account ORGNAME-ACCOUNTNAME --user MON_USER --cortex
+# 2. Executer UNE FOIS dans Snowsight la commande ALTER USER affichee
+# 3. Diagnostic + installation (scripts 01, 02, 04, 06) + synchronisation + test de Cortex
+python -m backend.app.snowflake_cli all
+```
+
+Ensuite, au démarrage du serveur :
+- **Synchronisation automatique** des données vers `ECOABIDJAN.CORE` toutes les `SNOWFLAKE_SYNC_MINUTES` (30 par défaut).
+- **Analyse des photos** par Cortex `AI_COMPLETE` (`AI_PROVIDER=snowflake`), avec repli local automatique en cas d'erreur.
+- **Assistant Eco** rédigé par Cortex `COMPLETE`.
+
+Autres commandes : `check`, `setup`, `sync`, `test-ai`. Les scripts du dossier [`snowflake/`](snowflake/) peuvent aussi être exécutés à la main dans Snowsight :
+- `00` diagnostic
+- `01` installation
+- `02` tables
+- `03` référentiel
+- `04` vues
+- `05` analyse des photos par `AI_COMPLETE`
+- `06` simulation `GENERATOR` + `GEOGRAPHY`
+- `07` `GEOGRAPHY` + `AI_CLASSIFY`
 
 **À vérifier dans ton compte** (le diagnostic le fait pour toi) :
 - le modèle multimodal (`claude-3-5-sonnet` par défaut, variable `CORTEX_VISION_MODEL`) est disponible dans ta région, sinon il faut activer `CORTEX_ENABLED_CROSS_REGION` ;

@@ -193,19 +193,14 @@ def test_payment_marked_paid(client, admin):
     assert client.patch(f"/api/admin/payments/{p['id']}", headers=admin, json={"status": "PAYEE"}).status_code == 400
 
 
-def test_snowflake_not_configured_returns_clear_message(client, admin):
-    r = client.post("/api/admin/snowflake/sync", headers=admin)
-    assert r.status_code == 400
-    checks = client.get("/api/admin/snowflake/diagnostics", headers=admin).json()
-    assert checks[0]["ok"] is False
-    cfg = client.get("/api/admin/snowflake/config", headers=admin).json()
-    assert cfg["configured"] is False and "password" not in cfg
-    # mode mot de passe sans mot de passe : refuse, rien n'est enregistre
-    r = client.put("/api/admin/snowflake/config", headers=admin,
-                   json={"account": "org-compte", "user": "moi", "authenticator": "snowflake"})
-    assert r.status_code == 400
-    assert client.put("/api/admin/snowflake/config", headers=admin,
-                      json={"account": "bad account!", "user": "moi"}).status_code == 422
+def test_snowflake_is_server_side_only(client, admin):
+    status = client.get("/api/admin/snowflake/status", headers=admin).json()
+    assert status["configured"] is False and "password" not in status
+    # aucune configuration Snowflake possible depuis l'API / l'interface
+    assert client.put("/api/admin/snowflake/config", headers=admin, json={}).status_code in (404, 405)
+    assert client.post("/api/admin/snowflake/sync", headers=admin).status_code in (404, 405)
+    from backend.app.services.snowflake_client import run_diagnostics
+    assert run_diagnostics()[0]["ok"] is False
 
 
 def test_pilot_simulation_meets_hackathon_constraints(client, admin):

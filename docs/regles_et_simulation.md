@@ -91,5 +91,10 @@ dans l'application se recalculent automatiquement quand on les change.
 | **Cortex COMPLETE (chat)** | Rédaction des réponses de l'assistant Eco | backend `services/assistant.py` |
 | **Stockage analytique** | Copie des données de l'application et vues du tableau de bord | `02_tables.sql`, `04_analytics_views.sql` |
 
-Depuis l'application (admin → Snowflake), un administrateur peut connecter le compte, lancer le diagnostic,
-installer automatiquement les scripts 01, 02, 04 et 06, puis synchroniser les données.
+L'intégration est **technique, côté serveur** :
+- connexion par paire de clés RSA, configurée avec `python -m backend.app.snowflake_cli init` ;
+- installation et simulation avec `snowflake_cli all` ;
+- **synchronisation automatique** des données de l'application vers `ECOABIDJAN.CORE` toutes les 30 minutes ;
+- appels Cortex directement depuis le backend (analyse des photos et assistant).
+
+Aucun réglage Snowflake n'est exposé dans l'interface.
