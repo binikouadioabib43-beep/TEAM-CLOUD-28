@@ -757,21 +757,68 @@ VIEWS.tarifs = async () => {
 };
 
 VIEWS.snowflake = async () => {
-  const h = await api("/api/health");
+  const cfg = await api("/api/admin/snowflake/config");
+  const v = (x) => esc(x ?? "");
+  const browserMode = cfg.authenticator !== "snowflake";
   view.innerHTML = `<h1>Snowflake & IA</h1>
     <div class="grid grid-2">
-      <div class="card"><h2>Configuration</h2>
-        <p>Moteur d'analyse photo : <strong>${esc(h.ai_provider)}</strong></p>
-        <p>Connexion Snowflake : ${h.snowflake_configured ? badge("OK") : `<span class="badge REJETE">non configuree</span>`}</p>
-        <p class="small muted">Renseigne les variables SNOWFLAKE_* dans le fichier .env puis redemarre le serveur. Mets AI_PROVIDER=snowflake pour analyser les photos avec Cortex AI.</p>
-        <div class="actions"><button class="btn" id="diag">Lancer le diagnostic</button><button class="btn ghost" id="sync">Synchroniser les donnees</button></div>
+      <form class="card" id="f-sf" autocomplete="off">
+        <h2>Connexion a mon compte Snowflake ${cfg.configured ? badge("OK") : `<span class="badge REJETE">non connecte</span>`}</h2>
+        <label for="sf-account">Identifiant du compte</label>
+        <input id="sf-account" name="account" value="${v(cfg.account)}" placeholder="monorg-moncompte" required>
+        <p class="small muted">Dans Snowsight : clique sur ton nom en bas a gauche → ton compte → « View account details ». Copie « Account identifier » (format <code>orgname-accountname</code>).</p>
+        <label for="sf-user">Nom d'utilisateur Snowflake</label>
+        <input id="sf-user" name="user" value="${v(cfg.user)}" required>
+        <label>Mode de connexion</label>
+        <label class="small" style="font-weight:400"><input type="radio" name="authenticator" value="externalbrowser" ${browserMode ? "checked" : ""} style="width:auto">
+          Via mon navigateur (recommande) : la page de connexion Snowflake s'ouvre, aucun mot de passe n'est enregistre</label>
+        <label class="small" style="font-weight:400"><input type="radio" name="authenticator" value="snowflake" ${browserMode ? "" : "checked"} style="width:auto">
+          Mot de passe (enregistre dans le fichier .env de ce PC)</label>
+        <div id="sf-pwd-box" ${browserMode ? "hidden" : ""}>
+          <label for="sf-pwd">Mot de passe Snowflake</label>
+          <input id="sf-pwd" name="password" type="password" autocomplete="new-password" placeholder="${cfg.has_password ? "inchange si vide" : ""}">
+        </div>
+        <div class="row">
+          <div><label for="sf-role">Role</label><input id="sf-role" name="role" value="${v(cfg.role)}" placeholder="ex. ACCOUNTADMIN ou ECOABIDJAN_APP"></div>
+          <div><label for="sf-wh">Entrepot (warehouse)</label><input id="sf-wh" name="warehouse" value="${v(cfg.warehouse)}" placeholder="ex. COMPUTE_WH"></div>
+        </div>
+        <div class="row">
+          <div><label for="sf-db">Base</label><input id="sf-db" name="database" value="${v(cfg.database ?? "ECOABIDJAN")}"></div>
+          <div><label for="sf-sc">Schema</label><input id="sf-sc" name="schema" value="${v(cfg.schema ?? "CORE")}"></div>
+        </div>
+        <label class="small" style="font-weight:400"><input type="checkbox" name="use_cortex_for_photos" ${cfg.ai_provider === "snowflake" ? "checked" : ""} style="width:auto">
+          Analyser les photos avec Snowflake Cortex AI (sinon estimation locale)</label>
+        <div class="actions"><button class="btn" id="sf-save">Enregistrer et me connecter</button></div>
+        <p class="small muted">En mode navigateur, une fenetre Snowflake s'ouvre a la premiere connexion : connecte-toi puis reviens ici.</p>
+      </form>
+      <div class="card"><h2>Diagnostic et synchronisation</h2>
+        <div class="actions"><button class="btn ghost" id="diag" ${cfg.configured ? "" : "disabled"}>Lancer le diagnostic</button>
+          <button class="btn ghost" id="sync" ${cfg.configured ? "" : "disabled"}>Synchroniser les donnees</button></div>
+        <div id="sf-out" class="small muted" style="margin-top:12px">${cfg.configured ? "—" : "Connecte d'abord ton compte."}</div>
+        <p class="notice" style="margin-top:12px">Avant la synchronisation, execute dans Snowsight les scripts <code>snowflake/01_setup.sql</code> et <code>02_tables.sql</code> du projet.</p>
       </div>
-      <div class="card"><h2>Resultat</h2><div id="sf-out" class="small muted">—</div></div>
     </div>`;
-  $("#diag").onclick = (e) => withBusy(e.target, async () => {
+  $$("input[name=authenticator]").forEach((r) => (r.onchange = () => { $("#sf-pwd-box").hidden = r.value !== "snowflake" || !r.checked; }));
+  const runDiag = async () => {
+    $("#sf-out").textContent = "Connexion a Snowflake… (une fenetre de connexion peut s'ouvrir)";
     const checks = await api("/api/admin/snowflake/diagnostics");
     $("#sf-out").innerHTML = `<table>${checks.map((c) => `<tr><td>${c.ok ? "✅" : "❌"}</td><td><strong>${esc(c.check)}</strong><div class="muted">${esc(c.detail)}</div></td></tr>`).join("")}</table>`;
-  });
+  };
+  $("#f-sf").onsubmit = (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    const body = Object.fromEntries(f);
+    body.use_cortex_for_photos = f.has("use_cortex_for_photos");
+    for (const k of ["password", "role", "warehouse", "database", "schema"]) if (!body[k]) body[k] = null;
+    withBusy($("#sf-save"), async () => {
+      await api("/api/admin/snowflake/config", { method: "PUT", body });
+      $("#sf-pwd").value = "";
+      $("#diag").disabled = false; $("#sync").disabled = false;
+      toast("Configuration enregistree");
+      await runDiag();
+    });
+  };
+  $("#diag").onclick = (e) => withBusy(e.target, runDiag);
   $("#sync").onclick = (e) => withBusy(e.target, async () => {
     const r = await api("/api/admin/snowflake/sync", { method: "POST" });
     $("#sf-out").innerHTML = `<p>Synchronisation terminee.</p><table>${Object.entries(r.tables).map(([t, n]) => `<tr><td>${esc(t)}</td><td class="num">${num(n)} lignes</td></tr>`).join("")}</table>`;

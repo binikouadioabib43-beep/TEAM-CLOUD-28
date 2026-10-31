@@ -13,7 +13,37 @@ class SnowflakeNotConfigured(RuntimeError):
     pass
 
 
+_shared_conn = None
+
+
+class _SharedConnection:
+    """Session ouverte une seule fois en mode navigateur : close() ne la ferme pas."""
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def close(self):
+        pass
+
+
+def reset_connection() -> None:
+    global _shared_conn
+    if _shared_conn is not None:
+        try:
+            _shared_conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+    _shared_conn = None
+
+
 def connect():
+    global _shared_conn
+    if settings.snowflake["authenticator"] == "externalbrowser" and _shared_conn is not None \
+            and not _shared_conn.is_closed():
+        return _SharedConnection(_shared_conn)
     if not settings.snowflake_configured:
         raise SnowflakeNotConfigured(
             "Snowflake n'est pas configure (SNOWFLAKE_ACCOUNT, SNOWFLAKE_USER et mot de passe ou cle)."
@@ -26,11 +56,20 @@ def connect():
         ) from exc
     sf = settings.snowflake
     kwargs = {k: sf[k] for k in ("account", "user", "role", "warehouse", "database", "schema") if sf[k]}
-    if sf["private_key_file"]:
+    if sf["authenticator"] == "externalbrowser":
+        # Ouvre la page de connexion Snowflake dans le navigateur ; le jeton est garde en cache
+        # par le systeme (si le compte l'autorise) pour ne pas redemander a chaque requete.
+        kwargs["authenticator"] = "externalbrowser"
+        kwargs["client_store_temporary_credential"] = True
+    elif sf["private_key_file"]:
         kwargs["private_key_file"] = sf["private_key_file"]
     else:
         kwargs["password"] = sf["password"]
     kwargs["application"] = "EcoAbidjan"
+    if sf["authenticator"] == "externalbrowser":
+        kwargs["client_session_keep_alive"] = True
+        _shared_conn = snowflake.connector.connect(**kwargs)
+        return _SharedConnection(_shared_conn)
     return snowflake.connector.connect(**kwargs)
 
 

@@ -193,6 +193,14 @@ def test_snowflake_not_configured_returns_clear_message(client, admin):
     assert r.status_code == 400
     checks = client.get("/api/admin/snowflake/diagnostics", headers=admin).json()
     assert checks[0]["ok"] is False
+    cfg = client.get("/api/admin/snowflake/config", headers=admin).json()
+    assert cfg["configured"] is False and "password" not in cfg
+    # mode mot de passe sans mot de passe : refuse, rien n'est enregistre
+    r = client.put("/api/admin/snowflake/config", headers=admin,
+                   json={"account": "org-compte", "user": "moi", "authenticator": "snowflake"})
+    assert r.status_code == 400
+    assert client.put("/api/admin/snowflake/config", headers=admin,
+                      json={"account": "bad account!", "user": "moi"}).status_code == 422
 
 
 def test_route_optimizer_visits_every_stop_once():

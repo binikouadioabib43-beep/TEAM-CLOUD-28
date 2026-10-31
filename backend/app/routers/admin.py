@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from ..config import save_env, settings
 from ..database import get_db
 from ..models import (
     Collection, CollectionCost, CollectionStop, Commune, Declaration, DeclarationItem, Material,
@@ -12,7 +13,7 @@ from ..models import (
 )
 from ..schemas import (
     CollectionCostIn, CollectionPlanIn, MaterialIn, ParameterIn, PaymentUpdateIn, RejectIn,
-    RelayPointIn, ReportStatusIn, StopUpdateIn, TariffIn, ValidationIn,
+    RelayPointIn, ReportStatusIn, SnowflakeConfigIn, StopUpdateIn, TariffIn, ValidationIn,
 )
 from ..security import require_roles
 from ..serializers import (
@@ -391,6 +392,42 @@ def dashboard(_: User = Depends(staff), db: Session = Depends(get_db)):
 
 
 # --- Snowflake -----------------------------------------------------------------------
+
+def _snowflake_public_config() -> dict:
+    sf = settings.snowflake
+    return {
+        "account": sf["account"], "user": sf["user"], "role": sf["role"],
+        "warehouse": sf["warehouse"], "database": sf["database"], "schema": sf["schema"],
+        "authenticator": sf["authenticator"] or ("snowflake" if sf["password"] else None),
+        "has_password": bool(sf["password"]), "configured": settings.snowflake_configured,
+        "ai_provider": settings.ai_provider,
+    }
+
+
+@router.get("/snowflake/config")
+def get_snowflake_config(_: User = Depends(admin_only)):
+    return _snowflake_public_config()
+
+
+@router.put("/snowflake/config")
+def set_snowflake_config(data: SnowflakeConfigIn, _: User = Depends(admin_only)):
+    from ..services.snowflake_client import reset_connection
+    values = data.model_dump(by_alias=True, exclude={"password", "use_cortex_for_photos"})
+    values["account"] = values["account"].strip()
+    values["user"] = values["user"].strip()
+    if data.authenticator == "externalbrowser":
+        values["password"] = None  # jamais de mot de passe stocke en mode navigateur
+    elif data.password:
+        values["password"] = data.password
+    elif not settings.snowflake["password"]:
+        raise HTTPException(400, "Mot de passe requis pour ce mode de connexion")
+    settings.update_snowflake(values)
+    reset_connection()
+    provider = "snowflake" if data.use_cortex_for_photos else "local"
+    settings.ai_provider = provider
+    save_env({"AI_PROVIDER": provider})
+    return _snowflake_public_config()
+
 
 @router.get("/snowflake/diagnostics")
 def snowflake_diagnostics(_: User = Depends(admin_only)):

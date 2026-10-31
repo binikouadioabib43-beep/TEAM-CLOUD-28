@@ -10,6 +10,9 @@ os.environ["DATA_DIR"] = tempfile.mkdtemp(prefix="ecoabidjan_test_")
 os.environ.pop("DATABASE_URL", None)
 os.environ["AI_PROVIDER"] = "local"
 os.environ["SEED_DEMO"] = "true"
+# Ignore la configuration Snowflake du fichier .env local pendant les tests
+for _key in ("ACCOUNT", "USER", "PASSWORD", "PRIVATE_KEY_FILE", "AUTHENTICATOR"):
+    os.environ[f"SNOWFLAKE_{_key}"] = ""
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi.testclient import TestClient  # noqa: E402

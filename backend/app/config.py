@@ -47,17 +47,45 @@ class Settings:
 
         self.snowflake = {
             key: os.getenv(f"SNOWFLAKE_{key.upper()}") or None
-            for key in (
-                "account", "user", "password", "private_key_file",
-                "role", "warehouse", "database", "schema",
-            )
+            for key in SNOWFLAKE_KEYS
         }
+        # externalbrowser = connexion via la page Snowflake du navigateur (SSO), sans mot de passe stocke
+        self.snowflake["authenticator"] = (self.snowflake["authenticator"] or "").lower() or None
         self.frontend_dir = BASE_DIR / "frontend"
 
     @property
     def snowflake_configured(self) -> bool:
         sf = self.snowflake
-        return bool(sf["account"] and sf["user"] and (sf["password"] or sf["private_key_file"]))
+        return bool(sf["account"] and sf["user"] and (
+            sf["password"] or sf["private_key_file"] or sf["authenticator"] == "externalbrowser"))
+
+    def update_snowflake(self, values: dict) -> None:
+        """Met a jour la configuration Snowflake en memoire et dans le fichier .env."""
+        for key, value in values.items():
+            self.snowflake[key] = value or None
+        save_env({f"SNOWFLAKE_{k.upper()}": (v or "") for k, v in values.items()})
+
+
+SNOWFLAKE_KEYS = (
+    "account", "user", "password", "private_key_file", "authenticator",
+    "role", "warehouse", "database", "schema",
+)
+
+
+def save_env(updates: dict) -> None:
+    """Ecrit ou remplace des cles dans .env en conservant le reste du fichier."""
+    env_file = BASE_DIR / ".env"
+    lines = env_file.read_text(encoding="utf-8").splitlines() if env_file.exists() else []
+    done = set()
+    for i, line in enumerate(lines):
+        key = line.split("=", 1)[0].strip()
+        if not line.lstrip().startswith("#") and key in updates:
+            lines[i] = f"{key}={updates[key]}"
+            done.add(key)
+    lines += [f"{k}={v}" for k, v in updates.items() if k not in done]
+    env_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    for k, v in updates.items():
+        os.environ[k] = v
 
 
 settings = Settings()

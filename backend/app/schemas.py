@@ -110,6 +110,20 @@ class StopUpdateIn(BaseModel):
     collected_weight_kg: float | None = Field(default=None, ge=0)
 
 
+class SnowflakeConfigIn(BaseModel):
+    account: str = Field(min_length=3, max_length=120, pattern=r"^[A-Za-z0-9_.\-]+$")
+    user: str = Field(min_length=1, max_length=120)
+    authenticator: Literal["externalbrowser", "snowflake"] = "externalbrowser"
+    password: str | None = Field(default=None, max_length=256)
+    role: str | None = Field(default=None, max_length=120)
+    warehouse: str | None = Field(default=None, max_length=120)
+    database: str | None = Field(default="ECOABIDJAN", max_length=120)
+    schema_: str | None = Field(default="CORE", max_length=120, alias="schema")
+    use_cortex_for_photos: bool = False
+
+    model_config = {"populate_by_name": True}
+
+
 class PaymentUpdateIn(BaseModel):
     status: Literal["PAYEE", "ANNULEE"]
     reference: str | None = Field(default=None, max_length=80)
