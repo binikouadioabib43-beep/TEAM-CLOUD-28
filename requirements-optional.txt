@@ -1,0 +1,5 @@
+# A installer seulement si tu utilises ces services
+# Snowflake (synchronisation analytique + analyse d'images Cortex AI)
+snowflake-connector-python>=3.12
+# PostgreSQL / PostGIS (base operationnelle en production)
+psycopg[binary]>=3.2
