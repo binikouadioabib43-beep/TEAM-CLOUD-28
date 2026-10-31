@@ -65,6 +65,18 @@ Mot de passe commun : `Demo@2026`
 - **IA** : l'estimation du poids sur photo est indicative et tracée (fournisseur, modèle, version du prompt, réponse brute, durée). Le tableau de bord mesure son écart avec le poids réellement collecté.
 - **Tournées** : itinéraire optimisé (plus proche voisin + 2-opt) depuis un point relais, avec durée et coût estimés (carburant, main d'œuvre, coût fixe), puis saisie des coûts réels.
 
+## Assistant IA « Eco »
+
+Un assistant de chat est disponible sur toutes les pages (bouton 💬), pour les visiteurs comme pour les usagers, agents et administrateurs.
+
+- **Personnalisé** : il répond à partir des vraies données de l'utilisateur (points, gains payés et en attente, statut des déclarations et signalements) et, pour les agents/admins, des indicateurs du moment (déclarations à valider, paiements en attente, communes les plus touchées).
+- **Calculs fiables** : « J'ai 5 kg de plastique et 20 canettes » → estimation au tarif du jour et points gagnés en point relais. Les chiffres sont calculés par l'application, jamais inventés par le modèle.
+- **Points relais les plus proches** grâce à la géolocalisation.
+- **Voix** : dictée au micro 🎤 et lecture des réponses à voix haute 🔊 (navigateurs compatibles), pour les personnes qui lisent difficilement.
+- **Liens d'action** vers le bon écran (Déclarer, Signaler, Portefeuille, Validations…).
+- **Moteur hybride** : quand Snowflake est connecté, les réponses sont rédigées par **Snowflake Cortex AI** (`SNOWFLAKE.CORTEX.COMPLETE`, modèle `CORTEX_CHAT_MODEL`) avec l'historique de la conversation. Sinon, ou en cas d'erreur, un moteur local répond : l'assistant fonctionne toujours, même hors ligne. `ASSISTANT_PROVIDER=local` force le moteur local.
+- **Traçabilité** : chaque échange est enregistré (intention détectée, moteur, modèle, latence) et répliqué dans Snowflake (`CORE.CHAT_MESSAGES`, vue `ANALYTICS.V_ASSISTANT_USAGE`) pour savoir ce que demandent les habitants.
+
 ## Snowflake
 
 1. Dans Snowsight, exécuter dans l'ordre les scripts du dossier [`snowflake/`](snowflake/) :

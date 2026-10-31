@@ -212,6 +212,21 @@ CREATE TABLE IF NOT EXISTS COLLECTION_COSTS (
   CREATED_AT TIMESTAMP_NTZ
 );
 
+-- Conversations avec l'assistant Eco (analyse des besoins des usagers)
+CREATE TABLE IF NOT EXISTS CHAT_MESSAGES (
+  ID NUMBER PRIMARY KEY,
+  SESSION_ID VARCHAR(64),
+  USER_ID NUMBER REFERENCES USERS(ID),
+  ROLE VARCHAR(12),                 -- user | assistant
+  CONTENT VARCHAR,
+  INTENT VARCHAR(40),               -- intention detectee (tarifs, relais, estimation...)
+  PROVIDER VARCHAR(30),             -- local | snowflake-cortex
+  MODEL VARCHAR(80),
+  LATENCY_MS NUMBER,
+  ERROR VARCHAR,
+  CREATED_AT TIMESTAMP_NTZ
+);
+
 -- Resultats bruts des analyses d'images faites directement dans Snowflake (05_cortex_image_analysis.sql)
 CREATE TABLE IF NOT EXISTS ECOABIDJAN.RAW.AI_BATCH_RESULTS (
   RELATIVE_PATH VARCHAR,

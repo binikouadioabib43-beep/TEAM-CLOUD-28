@@ -277,6 +277,22 @@ class CollectionStop(Base):
     collection: Mapped[Collection] = relationship(back_populates="stops")
 
 
+class ChatMessage(Base):
+    """Historique des conversations avec l'assistant (tracabilite et analyse des besoins)."""
+    __tablename__ = "chat_messages"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(64), index=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    role: Mapped[str] = mapped_column(String(12))  # user | assistant
+    content: Mapped[str] = mapped_column(Text)
+    intent: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    provider: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+
+
 class CollectionCost(Base):
     __tablename__ = "collection_costs"
     id: Mapped[int] = mapped_column(primary_key=True)

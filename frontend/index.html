@@ -17,6 +17,24 @@
   <nav id="nav" class="nav" hidden></nav>
   <main id="view" class="container"></main>
   <div id="toast" class="toast" hidden></div>
+
+  <button id="chat-fab" class="chat-fab" aria-label="Ouvrir l'assistant Eco" title="Assistant Eco">💬<span class="chat-fab-label">Eco</span></button>
+  <section id="chat" class="chat" hidden aria-label="Assistant Eco">
+    <header class="chat-head">
+      <div class="chat-avatar">♻</div>
+      <div class="chat-title"><strong>Eco</strong><span id="chat-engine" class="small">Assistant EcoAbidjan</span></div>
+      <button id="chat-tts" class="chat-icon" aria-pressed="false" title="Lire les reponses a voix haute" aria-label="Lecture vocale">🔈</button>
+      <button id="chat-reset" class="chat-icon" title="Nouvelle conversation" aria-label="Nouvelle conversation">↺</button>
+      <button id="chat-close" class="chat-icon" title="Fermer" aria-label="Fermer">✕</button>
+    </header>
+    <div id="chat-log" class="chat-log" aria-live="polite"></div>
+    <div id="chat-suggest" class="chat-suggest"></div>
+    <form id="chat-form" class="chat-form">
+      <button type="button" id="chat-mic" class="chat-icon" title="Parler" aria-label="Dicter un message">🎤</button>
+      <input id="chat-input" autocomplete="off" maxlength="1000" placeholder="Ecris ta question…" aria-label="Message">
+      <button class="chat-send" aria-label="Envoyer">➤</button>
+    </form>
+  </section>
   <div id="modal" class="modal" hidden>
     <form class="modal-card" id="modal-form">
       <h3 id="modal-title"></h3>

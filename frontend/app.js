@@ -168,6 +168,7 @@ function logout() {
   try { localStorage.removeItem("eco_token"); } catch { /* ignore */ }
   location.hash = "";
   router();
+  Chat.userChanged();
 }
 
 async function onLogged(data) {
@@ -175,6 +176,7 @@ async function onLogged(data) {
   try { localStorage.setItem("eco_token", data.token); } catch { /* ignore */ }
   location.hash = "";
   await router();
+  Chat.userChanged();
 }
 
 // --- Authentification ----------------------------------------------------------
@@ -824,6 +826,147 @@ VIEWS.snowflake = async () => {
     $("#sf-out").innerHTML = `<p>Synchronisation terminee.</p><table>${Object.entries(r.tables).map(([t, n]) => `<tr><td>${esc(t)}</td><td class="num">${num(n)} lignes</td></tr>`).join("")}</table>`;
   });
 };
+
+// --- Assistant Eco ---------------------------------------------------------------
+const Chat = (() => {
+  const box = $("#chat"), log = $("#chat-log"), input = $("#chat-input"), sugg = $("#chat-suggest");
+  let sessionId = null, loaded = false, busy = false, tts = false, lastPos = null;
+  const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+  const storeKey = () => `eco_chat_${state.user ? state.user.id : "anon"}`;
+  const newId = () => (crypto.randomUUID ? crypto.randomUUID().replace(/-/g, "") : String(Date.now()) + Math.random().toString(36).slice(2));
+  function ensureSession() {
+    try { sessionId = localStorage.getItem(storeKey()); } catch { sessionId = null; }
+    if (!sessionId) { sessionId = newId(); try { localStorage.setItem(storeKey(), sessionId); } catch { /* ignore */ } }
+  }
+
+  /** Markdown minimal et sur : le texte est echappe avant mise en forme. */
+  function md(text) {
+    const inline = (s) => esc(s).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>").replace(/(^|[^*])\*(?!\s)(.+?)\*/g, "$1<em>$2</em>");
+    const out = []; let list = null;
+    for (const raw of String(text).split("\n")) {
+      const line = raw.trimEnd();
+      const ul = line.match(/^\s*[-•]\s+(.*)/), ol = line.match(/^\s*\d+[.)]\s+(.*)/);
+      if (ul || ol) {
+        const type = ul ? "ul" : "ol";
+        if (list !== type) { if (list) out.push(`</${list}>`); out.push(`<${type}>`); list = type; }
+        out.push(`<li>${inline((ul || ol)[1])}</li>`);
+      } else {
+        if (list) { out.push(`</${list}>`); list = null; }
+        if (line.trim()) out.push(`<p>${inline(line)}</p>`);
+      }
+    }
+    if (list) out.push(`</${list}>`);
+    return out.join("");
+  }
+
+  function add(role, text, extra = {}) {
+    const div = document.createElement("div");
+    div.className = `msg ${role === "user" ? "user" : "bot"}`;
+    div.innerHTML = role === "user" ? esc(text) : md(text);
+    if (extra.links?.length && state.user) {
+      div.insertAdjacentHTML("beforeend", `<div class="msg-links">${extra.links.map((l) => `<a href="#${esc(l.route)}">${esc(l.label)}</a>`).join("")}</div>`);
+      $$(".msg-links a", div).forEach((a) => (a.onclick = () => { if (window.innerWidth < 600) close(); }));
+    }
+    if (extra.meta) div.insertAdjacentHTML("beforeend", `<div class="msg-meta">${esc(extra.meta)}</div>`);
+    log.appendChild(div);
+    log.scrollTop = log.scrollHeight;
+    return div;
+  }
+
+  function setSuggestions(list) {
+    sugg.innerHTML = (list || []).map((s) => `<button type="button">${esc(s)}</button>`).join("");
+    $$("button", sugg).forEach((b) => (b.onclick = () => send(b.textContent)));
+  }
+
+  function speak(text) {
+    if (!tts || !window.speechSynthesis) return;
+    speechSynthesis.cancel();
+    const clean = text.replace(/[*_#>`]/g, "").replace(/[\u{1F300}-\u{1FAFF}☀-➿]/gu, "");
+    const u = new SpeechSynthesisUtterance(clean);
+    u.lang = "fr-FR";
+    const fr = speechSynthesis.getVoices().find((v) => v.lang?.startsWith("fr"));
+    if (fr) u.voice = fr;
+    speechSynthesis.speak(u);
+  }
+
+  const engineLabel = (p) => (p === "snowflake-cortex" ? "Propulse par Snowflake Cortex AI" : "Assistant EcoAbidjan");
+
+  async function load() {
+    ensureSession();
+    log.innerHTML = "";
+    try {
+      const [w, hist] = await Promise.all([api("/api/assistant/welcome"), api(`/api/assistant/history?session_id=${sessionId}`)]);
+      $("#chat-engine").textContent = engineLabel(w.provider);
+      add("bot", w.reply);
+      hist.forEach((m) => add(m.role, m.content));
+      setSuggestions(w.suggestions);
+      loaded = true;
+    } catch (e) { add("bot", "Je n'arrive pas a joindre le serveur pour le moment."); }
+  }
+
+  async function send(text) {
+    text = (text || "").trim();
+    if (!text || busy) return;
+    busy = true;
+    input.value = "";
+    add("user", text);
+    setSuggestions([]);
+    const typing = add("bot", "");
+    typing.innerHTML = `<span class="typing" aria-label="Eco ecrit"><span></span><span></span><span></span></span>`;
+    // Position pour les questions de proximite (si l'usager l'a autorisee)
+    if (!lastPos && /proche|relais|pres de|deposer|où|ou est/i.test(text)) {
+      try { lastPos = await Promise.race([getPosition(), new Promise((_, r) => setTimeout(() => r(new Error("delai")), 6000))]); } catch { /* sans position */ }
+    }
+    try {
+      const body = { message: text, session_id: sessionId };
+      if (lastPos) [body.latitude, body.longitude] = lastPos;
+      const r = await api("/api/assistant/chat", { method: "POST", body });
+      typing.remove();
+      add("bot", r.reply, { links: r.links });
+      $("#chat-engine").textContent = engineLabel(r.provider);
+      setSuggestions(r.suggestions);
+      speak(r.reply);
+    } catch (e) {
+      typing.remove();
+      add("bot", `Desole, une erreur est survenue : ${e.message}`);
+    } finally { busy = false; input.focus(); }
+  }
+
+  function open() {
+    box.hidden = false; $("#chat-fab").hidden = true;
+    if (!loaded) load();
+    setTimeout(() => input.focus(), 50);
+  }
+  function close() { box.hidden = true; $("#chat-fab").hidden = false; if (window.speechSynthesis) speechSynthesis.cancel(); }
+
+  $("#chat-fab").onclick = open;
+  $("#chat-close").onclick = close;
+  $("#chat-form").onsubmit = (e) => { e.preventDefault(); send(input.value); };
+  $("#chat-reset").onclick = () => { try { localStorage.removeItem(storeKey()); } catch { /* ignore */ } loaded = false; load(); };
+  $("#chat-tts").onclick = (e) => {
+    tts = !tts; e.currentTarget.setAttribute("aria-pressed", String(tts)); e.currentTarget.textContent = tts ? "🔊" : "🔈";
+    if (!window.speechSynthesis) toast("Lecture vocale non disponible sur ce navigateur", true);
+  };
+  const mic = $("#chat-mic");
+  if (!Recognition) mic.hidden = true;
+  else mic.onclick = () => {
+    const rec = new Recognition();
+    rec.lang = "fr-FR"; rec.interimResults = true; rec.maxAlternatives = 1;
+    mic.classList.add("listening");
+    rec.onresult = (ev) => {
+      const t = [...ev.results].map((r) => r[0].transcript).join("");
+      input.value = t;
+      if (ev.results[ev.results.length - 1].isFinal) send(t);
+    };
+    rec.onerror = () => toast("Micro indisponible ou refuse", true);
+    rec.onend = () => mic.classList.remove("listening");
+    rec.start();
+  };
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !box.hidden) close(); });
+
+  return { userChanged() { loaded = false; if (!box.hidden) load(); }, open };
+})();
 
 // --- Demarrage ------------------------------------------------------------------
 async function boot() {

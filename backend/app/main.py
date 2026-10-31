@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from .config import settings
 from .database import Base, SessionLocal, engine
 from . import models  # noqa: F401  (enregistre les tables)
-from .routers import admin, citizen, public
+from .routers import admin, assistant, citizen, public
 from .seed import run_seed
 
 
@@ -24,6 +24,7 @@ app = FastAPI(title="EcoAbidjan API", version="1.0.0", lifespan=lifespan)
 app.include_router(public.router)
 app.include_router(citizen.router)
 app.include_router(admin.router)
+app.include_router(assistant.router)
 
 if settings.frontend_dir.exists():
     app.mount("/static", StaticFiles(directory=settings.frontend_dir), name="static")

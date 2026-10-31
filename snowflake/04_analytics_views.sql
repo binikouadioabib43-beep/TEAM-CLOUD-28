@@ -105,6 +105,20 @@ LEFT JOIN CORE.PAYMENTS P ON P.USER_ID = U.ID AND P.STATUS <> 'ANNULEE'
 WHERE U.ROLE IN ('citoyen','menage','commercant')
 GROUP BY 1, 2, 3, 4, 5;
 
+-- Assistant Eco : sujets les plus demandes et performance des moteurs
+CREATE OR REPLACE VIEW V_ASSISTANT_USAGE AS
+SELECT
+  DATE_TRUNC('WEEK', Q.CREATED_AT) AS SEMAINE,
+  Q.INTENT                         AS INTENTION,
+  COUNT(*)                         AS QUESTIONS,
+  COUNT(DISTINCT Q.SESSION_ID)     AS CONVERSATIONS,
+  AVG(A.LATENCY_MS)                AS LATENCE_MOYENNE_MS,
+  COUNT_IF(A.PROVIDER = 'snowflake-cortex') AS REPONSES_CORTEX
+FROM CORE.CHAT_MESSAGES Q
+LEFT JOIN CORE.CHAT_MESSAGES A ON A.SESSION_ID = Q.SESSION_ID AND A.ID = Q.ID + 1 AND A.ROLE = 'assistant'
+WHERE Q.ROLE = 'user'
+GROUP BY 1, 2;
+
 -- Zones prioritaires : grille d'environ 1 km avec les signalements encore ouverts
 CREATE OR REPLACE VIEW V_ZONES_PRIORITAIRES AS
 SELECT

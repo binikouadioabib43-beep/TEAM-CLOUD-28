@@ -44,6 +44,9 @@ class Settings:
         self.ai_provider = os.getenv("AI_PROVIDER", "local").lower()
         self.cortex_model = os.getenv("CORTEX_VISION_MODEL", "claude-3-5-sonnet")
         self.cortex_stage = os.getenv("CORTEX_IMAGE_STAGE", "@ECOABIDJAN.RAW.PHOTOS_STAGE")
+        # Assistant : auto = Cortex si Snowflake est connecte, sinon moteur local
+        self.assistant_provider = os.getenv("ASSISTANT_PROVIDER", "auto").lower()
+        self.cortex_chat_model = os.getenv("CORTEX_CHAT_MODEL", "claude-3-5-sonnet")
 
         self.snowflake = {
             key: os.getenv(f"SNOWFLAKE_{key.upper()}") or None

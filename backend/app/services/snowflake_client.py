@@ -114,7 +114,7 @@ SYNC_MODELS = [
     models.Commune, models.User, models.Material, models.Tariff, models.Parameter,
     models.RelayPoint, models.Collection, models.Report, models.Declaration, models.Photo,
     models.AIAnalysis, models.DeclarationItem, models.Payment, models.PointsTransaction,
-    models.CollectionStop, models.CollectionCost,
+    models.CollectionStop, models.CollectionCost, models.ChatMessage,
 ]
 # Colonnes jamais envoyees vers l'entrepot analytique.
 EXCLUDED_COLUMNS = {"users": {"password_hash", "email", "phone"}}
